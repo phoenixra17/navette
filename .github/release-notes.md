@@ -12,7 +12,10 @@
 ### Android (Android 14+)
 
 1. On the phone, download `Navette-….apk` and open it; allow your browser to install apps if asked.
-   Play Protect may warn that the app is unknown: choose **Install anyway**.
+   Play Protect may warn that the app is unknown: choose **Install anyway**. If it says **“App
+   blocked to protect your device”** with only an OK button, install from a computer with USB
+   debugging on (`adb install --user 0 Navette-….apk`), or temporarily turn off *Play Store ›
+   profile › Play Protect › ⚙ › Scan apps with Play Protect* while installing.
 2. Open Navette › **Scanner le code du Mac**, and scan the code shown by the Mac
    (menu ⇄ › *Appairer le téléphone…*).
 
@@ -23,6 +26,6 @@ Optional features (automatic sending from the phone, instant hotspot): see the
 
 **Aperçu** — [vos avis sont bienvenus](https://github.com/phoenixra17/navette/issues/new/choose).
 Mac : décompressez, placez Navette dans *Applications*, puis *Réglages Système › Confidentialité et
-sécurité › Ouvrir quand même*. Android : ouvrez l'APK sur le téléphone, puis *Installer quand même*.
+sécurité › Ouvrir quand même*. Android : ouvrez l'APK sur le téléphone, puis *Installer quand même* ; si Play Protect affiche « Appli bloquée », installez par câble (`adb install --user 0 Navette-….apk`) ou désactivez temporairement l'analyse Play Protect.
 Relais de test : `https://navette.yourpediatricsurgeon.com`. Détails dans le
 [README en français](https://github.com/phoenixra17/navette/blob/main/README.fr.md#installation).

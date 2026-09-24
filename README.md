@@ -111,7 +111,20 @@ installing Tailscale: they enter `https://your-relay.example.com` on first launc
 Build with a JDK 17+ (Android Studio's works): `cd android && ./gradlew assembleRelease`, then
 install `app/build/outputs/apk/release/app-release.apk`. Open Navette › **Scanner le code du Mac**
 and scan the QR code shown by the Mac (menu ⇄ › *Appairer le téléphone…*), then follow the in-app
-checklist: notification access, background battery use, Quick Settings tile.
+checklist: notification access, background battery use, Quick Settings tile. If you open a
+`navette://pair` link instead of scanning, check that the verification code matches the one under
+the Mac's QR code.
+
+**If Google Play Protect blocks the APK** (“App blocked to protect your device”, with only an OK
+button): Play Protect refuses sideloaded apps that ask for sensitive access such as notifications.
+Either install it from a computer with USB debugging on:
+
+```bash
+adb install --user 0 Navette-0.2.0.apk
+```
+
+or temporarily turn off *Play Store › your profile › Play Protect › ⚙ › Scan apps with Play
+Protect*, install the APK, then turn it back on.
 
 **Optional — automatic sending from the phone:** enable USB debugging, plug the phone into the Mac,
 run `android/scripts/activer-auto.sh`, then accept the log-access prompt in Navette.

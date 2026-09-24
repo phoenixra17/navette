@@ -113,7 +113,20 @@ ni installer Tailscale : ils saisissent `https://votre-relais.exemple.com` au pr
 Compilez avec un JDK 17+ (celui d'Android Studio convient) : `cd android && ./gradlew assembleRelease`,
 puis installez `app/build/outputs/apk/release/app-release.apk`. Ouvrez Navette › **Scanner le code
 du Mac** (menu ⇄ du Mac › *Appairer le téléphone…*), puis suivez les étapes de l'écran : accès aux
-notifications, batterie en arrière-plan, tuile des réglages rapides.
+notifications, batterie en arrière-plan, tuile des réglages rapides. Si vous ouvrez un lien
+`navette://pair` au lieu de scanner, vérifiez que le code de vérification est celui affiché sous le
+QR code du Mac.
+
+**Si Google Play Protect bloque l'APK** (« Appli bloquée pour protéger votre appareil », avec un
+seul bouton OK) : Play Protect refuse les apps installées hors Play Store qui demandent des accès
+sensibles comme les notifications. Installez-la depuis un ordinateur, débogage USB activé :
+
+```bash
+adb install --user 0 Navette-0.2.0.apk
+```
+
+ou désactivez temporairement *Play Store › votre profil › Play Protect › ⚙ › Analyser les applis
+avec Play Protect*, installez l'APK, puis réactivez-la.
 
 **Facultatif — envoi automatique depuis le téléphone :** activez le débogage USB, branchez le
 téléphone au Mac, lancez `android/scripts/activer-auto.sh`, puis acceptez l'accès aux journaux
