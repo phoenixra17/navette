@@ -1,0 +1,40 @@
+name: Feedback / idea
+description: Tell us how you use Navette, what you'd want, and whether a polished app would interest you.
+labels: [feedback]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks! Answers in English or French are both welcome. / Réponses en anglais ou en français bienvenues."
+  - type: checkboxes
+    id: features
+    attributes:
+      label: Which features would you actually use?
+      options:
+        - label: Clipboard (text and images)
+        - label: Notifications with quick reply
+        - label: Instant hotspot
+        - label: Phone battery / signal on the Mac
+        - label: Ring my phone
+        - label: Links between devices
+  - type: textarea
+    id: missing
+    attributes:
+      label: What is missing or would make you switch to it?
+  - type: input
+    id: devices
+    attributes:
+      label: Your devices
+      placeholder: "e.g. MacBook Air M3, macOS 26 — Pixel 9, Android 16"
+  - type: dropdown
+    id: polished
+    attributes:
+      label: Would you use a polished version (store install, no relay to host)?
+      options:
+        - "Yes, and I would pay for it"
+        - "Yes, if it is free"
+        - "No, the self-hosted version suits me"
+        - "Not sure"
+  - type: textarea
+    id: anything
+    attributes:
+      label: Anything else

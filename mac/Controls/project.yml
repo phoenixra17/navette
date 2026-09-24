@@ -1,0 +1,32 @@
+# Extension « Centre de contrôle » de Navette (bouton Point d'accès).
+# Générer le projet : xcodegen generate ; compiler : ../scripts/build-app.sh (qui l'intègre à Navette.app).
+name: NavetteControls
+options:
+  bundleIdPrefix: fr.soufiane.navette
+  deploymentTarget:
+    macOS: "26.0"
+targets:
+  NavetteControls:
+    type: app-extension
+    platform: macOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Navette
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: NavetteControls.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.soufiane.navette.controles
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        SWIFT_VERSION: "5.0"
+        ENABLE_HARDENED_RUNTIME: NO

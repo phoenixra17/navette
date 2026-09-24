@@ -1,0 +1,13 @@
+# Relais Navette. Avant le premier lancement, créez .env à côté de ce fichier :
+#   NAVETTE_TOKEN=<jeton copié depuis le menu de l'app Mac>   (plusieurs : séparés par des virgules)
+#   TZ=Europe/Paris
+# ou, pour un relais partagé où chaque paire d'appareils a son salon : NAVETTE_OPEN=1
+# puis : docker compose up -d --build
+services:
+  navette:
+    build: .
+    container_name: navette
+    restart: unless-stopped
+    ports:
+      - "3200:3200"
+    env_file: .env

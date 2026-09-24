@@ -1,0 +1,28 @@
+name: Something doesn't work
+description: Report a problem.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and macOS version
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model and Android version
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: "Mac: ~/Library/Logs/Navette.log. Android: adb logcat | grep -i navette. Remove anything private before pasting."
+      render: text
