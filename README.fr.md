@@ -56,12 +56,18 @@ Détails : [PROTOCOL.md](PROTOCOL.md) (en anglais).
 - **Le point d'accès instantané passe par une routine Samsung**, car Android ne laisse aucune app
   l'allumer. Le Mac se connecte brièvement au téléphone comme kit mains-libres Bluetooth pour la
   déclencher.
-- **Ni signé par Apple, ni sur le Play Store.** Vous compilez l'app Mac vous-même (signature
-  locale) et installez l'APK à la main. Gatekeeper et Play Protect afficheront un avertissement.
+- **Ni signé par Apple, ni sur le Play Store.** Vous téléchargez les apps depuis les
+  [Releases](https://github.com/phoenixra17/navette/releases/latest) (ou les compilez) et les ouvrez
+  à la main : Gatekeeper et Play Protect afficheront un avertissement.
 - Testé sur un MacBook sous macOS 26 et un Galaxy S24 Ultra sous Android 16 / One UI.
   Nécessite Android 14+ et macOS 14+ (macOS 26 pour le bouton du Centre de contrôle).
 
 ## Installation
+
+**Le plus rapide :** téléchargez `Navette-…-mac.zip` et `Navette-….apk` depuis la
+[dernière version](https://github.com/phoenixra17/navette/releases/latest) — sa page explique
+comment les ouvrir — puis saisissez le relais de test et appairez le téléphone comme ci-dessous.
+Pour compiler vous-même, suivez les étapes 1 à 3.
 
 ### 1. Mac
 

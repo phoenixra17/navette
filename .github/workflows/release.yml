@@ -1,0 +1,102 @@
+# Teste les trois parties, compile l'APK et l'app Mac, et publie une Release pour chaque
+# étiquette de version (git tag v0.2.0 && git push origin v0.2.0).
+# Lancé à la main (Actions › Release › Run workflow), il compile sans publier : les fichiers
+# restent téléchargeables dans les « artifacts » de l'exécution.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # v0.2.0 → 0.2.0 ; lancement manuel → 0.0.0-dev.<numéro d'exécution>
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('0.0.0-dev.{0}', github.run_number) }}
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Tests du relais
+        working-directory: server
+        run: npm ci && npm test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Clé de signature
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NAVETTE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.NAVETTE_KEYSTORE_PASSWORD }}
+        # Sans les secrets (fork), l'APK est signé avec une clé de debug.
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/navette.jks"
+            {
+              echo "NAVETTE_KEYSTORE=$RUNNER_TEMP/navette.jks"
+              echo "NAVETTE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "NAVETTE_KEY_ALIAS=navette"
+              echo "NAVETTE_KEY_PASSWORD=$KEYSTORE_PASSWORD"
+            } >> "$GITHUB_ENV"
+          fi
+      - name: Tests et APK
+        working-directory: android
+        run: |
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease \
+            -PnavetteVersion="${VERSION#v}" -PnavetteBuild="$GITHUB_RUN_NUMBER"
+          mv app/build/outputs/apk/release/app-release.apk "Navette-${VERSION#v}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: android/Navette-*.apk
+          if-no-files-found: error
+
+  mac:
+    # Le bouton du Centre de contrôle exige le SDK de macOS 26.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: XcodeGen
+        run: brew install xcodegen
+      - name: Tests et app
+        working-directory: mac
+        run: |
+          swift test
+          NAVETTE_VERSION="${VERSION#v}" NAVETTE_BUILD="$GITHUB_RUN_NUMBER" scripts/build-app.sh
+          ditto -c -k --keepParent build/Navette.app "Navette-${VERSION#v}-mac.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: mac/Navette-*-mac.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [relay, android, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publier la Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Navette ${VERSION#v}" \
+            --notes-file .github/release-notes.md \
+            --generate-notes

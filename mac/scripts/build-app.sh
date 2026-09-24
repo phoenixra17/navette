@@ -1,14 +1,19 @@
 #!/bin/zsh
 # Compile Navette et assemble Navette.app (signature ad hoc).
 # Usage : scripts/build-app.sh [--install]   (--install copie l'app dans /Applications)
+# Version : NAVETTE_VERSION (ex. 0.2.0) et NAVETTE_BUILD (entier croissant), fixées par la CI.
 set -euo pipefail
 cd "${0:A:h}/.."
+VERSION=${NAVETTE_VERSION:-0.1.0}
+BUILD=${NAVETTE_BUILD:-1}
 
-swift build -c release
+# Binaire universel : Mac Apple Silicon et Intel.
+ARCHS=(--arch arm64 --arch x86_64)
+swift build -c release $ARCHS
 APP=build/Navette.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/Navette "$APP/Contents/MacOS/Navette"
+cp "$(swift build -c release $ARCHS --show-bin-path)/Navette" "$APP/Contents/MacOS/Navette"
 cp Resources/Navette.icns "$APP/Contents/Resources/Navette.icns" # régénérer : swift scripts/make-icon.swift
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -22,8 +27,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Navette</string>
   <key>CFBundleIconFile</key><string>Navette</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleURLTypes</key>
@@ -50,9 +55,12 @@ PLIST
 # Bouton du Centre de contrôle (extension WidgetKit, projet Xcode généré par XcodeGen).
 ( cd Controls && xcodegen generate --quiet \
   && xcodebuild -project NavetteControls.xcodeproj -scheme NavetteControls -configuration Release \
-       -derivedDataPath build build -quiet )
+       -derivedDataPath build ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO build -quiet )
 mkdir -p "$APP/Contents/PlugIns"
 cp -R Controls/build/Build/Products/Release/NavetteControls.appex "$APP/Contents/PlugIns/"
+for key value in CFBundleShortVersionString "$VERSION" CFBundleVersion "$BUILD"; do
+  /usr/libexec/PlistBuddy -c "Set :$key $value" "$APP/Contents/PlugIns/NavetteControls.appex/Contents/Info.plist"
+done
 codesign --force --sign - --entitlements Controls/NavetteControls.entitlements "$APP/Contents/PlugIns/NavetteControls.appex"
 
 codesign --force --sign - "$APP"

@@ -52,14 +52,20 @@ Details: [PROTOCOL.md](PROTOCOL.md).
   gesture: Quick Settings tile, notification button, text selection menu, or Share.
 - **Instant hotspot relies on a Samsung routine**, because Android lets no app turn the hotspot on.
   The Mac briefly connects to the phone as a Bluetooth hands-free device to trigger it.
-- **Not signed by Apple, not on the Play Store.** You build the Mac app yourself (ad-hoc signed)
-  and install the APK by hand. Gatekeeper and Play Protect will warn you.
+- **Not signed by Apple, not on the Play Store.** You download the apps from
+  [Releases](https://github.com/phoenixra17/navette/releases/latest) (or build them) and open them
+  by hand: Gatekeeper and Play Protect will warn you.
 - Tested on a MacBook with macOS 26 and a Galaxy S24 Ultra with Android 16 / One UI.
   Requires Android 14+ and macOS 14+ (macOS 26 for the Control Center button).
 
 ## Install
 
 The apps' interface is in **French** for now; menu labels are quoted as they appear.
+
+**Quickest:** download `Navette-…-mac.zip` and `Navette-….apk` from the
+[latest release](https://github.com/phoenixra17/navette/releases/latest) — its page explains how to
+open them — then enter the test relay and pair the phone as described below. To build from source,
+follow steps 1–3.
 
 ### 1. Mac
 
