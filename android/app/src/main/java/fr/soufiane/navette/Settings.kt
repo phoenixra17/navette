@@ -27,6 +27,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("forwardNotifications", true)
         set(value) = prefs.edit().putBoolean("forwardNotifications", value).apply()
 
+    /** Horodatage du dernier presse-papier reçu du Mac : « Récupérer » n'applique rien de plus ancien. */
+    var lastClipAt: Long
+        get() = prefs.getLong("lastClipAt", 0L)
+        set(value) = prefs.edit().putLong("lastClipAt", value).apply()
+
     val isPaired: Boolean get() = server.isNotEmpty() && secret.isNotEmpty()
 
     /** Clés dérivées du secret, ou null si pas encore appairé. */
@@ -39,7 +44,9 @@ class Settings(context: Context) {
         if (uri.scheme != "navette" || uri.host != "pair") return false
         val server = uri.getQueryParameter("u") ?: return false
         val secret = uri.getQueryParameter("s") ?: return false
+        if (!server.startsWith("http://") && !server.startsWith("https://")) return false
         if (runCatching { NavetteCrypto.deriveKeys(secret) }.isFailure) return false
+        if (secret != this.secret) lastClipAt = 0L
         this.server = server
         this.secret = secret
         return true

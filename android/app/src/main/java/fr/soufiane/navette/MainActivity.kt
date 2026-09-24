@@ -61,15 +61,23 @@ class MainActivity : Activity() {
         handlePairingLink(intent)
     }
 
-    /** Lien navette://pair ouvert depuis l'appareil photo : on confirme avant d'appliquer,
-     *  car n'importe quelle page web pourrait ouvrir ce lien vers un autre serveur. */
+    /** Lien navette://pair ouvert depuis l'appareil photo : on confirme avant d'appliquer, car
+     *  n'importe quelle app ou page web peut ouvrir ce lien, avec l'adresse de votre propre serveur
+     *  (relais partagé) mais son secret à elle. Le code de vérification doit être celui du Mac. */
     private fun handlePairingLink(intent: Intent?) {
         val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
         setIntent(Intent(this, MainActivity::class.java))
         val server = uri.getQueryParameter("u") ?: return
+        val code = uri.getQueryParameter("s")?.let { runCatching { NavetteCrypto.deriveKeys(it) }.getOrNull() }
+            ?.fingerprint ?: return Toast.makeText(this, "Ce n’est pas un code Navette", Toast.LENGTH_LONG).show()
+        val replaces = if (settings.isPaired) "\n\n⚠️ Ce téléphone est déjà appairé : l’appairage actuel sera remplacé." else ""
         AlertDialog.Builder(this)
             .setTitle("Appairer avec ce Mac ?")
-            .setMessage("Serveur : $server\n\nN’acceptez que si ce code vient de votre propre Mac.")
+            .setMessage(
+                "Code de vérification : $code\nServeur : $server\n\n" +
+                    "Vérifiez que ce code est celui affiché par votre Mac (menu Navette › Appairer le téléphone…). " +
+                    "S’il est différent, annulez : ce lien ne vient pas de votre Mac.$replaces",
+            )
             .setPositiveButton("Appairer") { _, _ -> applyPairing(uri.toString()) }
             .setNegativeButton("Annuler", null)
             .show()

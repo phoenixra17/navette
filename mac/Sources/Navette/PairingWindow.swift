@@ -7,9 +7,9 @@ import NavetteCore
 final class PairingWindow: NSWindowController {
     private let onCopyToken: () -> Void
 
-    init(config: Config, token: String, onCopyToken: @escaping () -> Void) {
+    init(config: Config, token: String, fingerprint: String, onCopyToken: @escaping () -> Void) {
         self.onCopyToken = onCopyToken
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 600),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Appairer Navette"
         window.isReleasedWhenClosed = false
@@ -27,6 +27,11 @@ final class PairingWindow: NSWindowController {
         warning.textColor = .secondaryLabelColor
         warning.alignment = .center
 
+        // Le téléphone affiche le même code avant d'accepter : un lien d'appairage piégé en aurait un autre.
+        let check = NSTextField(labelWithString: "Code de vérification : \(fingerprint)")
+        check.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
+        check.alignment = .center
+
         let serverHelp = NSTextField(wrappingLabelWithString:
             "Serveur : \(config.server)\nLe serveur a besoin du jeton ci-dessous dans sa variable NAVETTE_TOKEN.")
         serverHelp.alignment = .center
@@ -34,7 +39,7 @@ final class PairingWindow: NSWindowController {
         let copy = NSButton(title: "Copier le jeton du serveur", target: self, action: #selector(copyToken))
         copy.bezelStyle = .rounded
 
-        let stack = NSStackView(views: [title, qr, warning, serverHelp, copy])
+        let stack = NSStackView(views: [title, qr, check, warning, serverHelp, copy])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 14

@@ -109,7 +109,17 @@ object Relay {
                         !it.isSuccessful -> null to "Erreur serveur ${it.code}"
                         else -> runCatching {
                             val clip = NavetteCrypto.Clip.fromJson(JSONObject(it.body!!.string()))
-                            ClipContent.fromPayload(NavetteCrypto.open(keys.encKey, clip)) to null
+                            // Le dernier élément peut venir du Mac ou de ce téléphone.
+                            val payload = runCatching { NavetteCrypto.open(keys.encKey, clip, NavetteCrypto.MAC) }
+                                .getOrElse { NavetteCrypto.open(keys.encKey, clip, NavetteCrypto.PHONE) }
+                            val t = payload.optLong("t")
+                            // Le serveur pourrait resservir un ancien élément : on n'applique que du plus récent.
+                            if (t <= settings.lastClipAt) {
+                                null to "Rien de plus récent que le dernier élément reçu"
+                            } else {
+                                settings.lastClipAt = t
+                                ClipContent.fromPayload(payload) to null
+                            }
                         }.getOrElse { null to "Élément illisible (secret différent ?)" }
                     }
                     main.post { done(result.first, result.second) }

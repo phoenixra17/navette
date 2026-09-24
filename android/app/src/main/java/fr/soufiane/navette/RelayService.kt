@@ -157,7 +157,11 @@ class RelayService : Service() {
                 val received = runCatching {
                     val msg = JSONObject(text)
                     if (msg.optString("type") != "clip") return
-                    NavetteCrypto.open(keys.encKey, NavetteCrypto.Clip.fromJson(msg))
+                    val clip = NavetteCrypto.Clip.fromJson(msg)
+                    val payload = NavetteCrypto.open(keys.encKey, clip)
+                    // Déjà reçu ou trop ancien : le serveur ne peut pas rejouer une réponse ou une sonnerie.
+                    if (!replayGuard.accept(clip.id, payload.optLong("t", -1L))) return
+                    payload
                 }
                 main.post {
                     received.onSuccess { handle(it) }
@@ -196,7 +200,10 @@ class RelayService : Service() {
     /** Message venu du Mac : presse-papier, ou commande (réponse, sonnerie, lien…). */
     private fun handle(payload: JSONObject) {
         when (payload.optString("kind")) {
-            "text", "image" -> ClipContent.fromPayload(payload)?.let { writeClipboard(it) }
+            "text", "image" -> ClipContent.fromPayload(payload)?.let {
+                settings.lastClipAt = payload.optLong("t")
+                writeClipboard(it)
+            }
             "reply" -> {
                 val key = payload.optString("key")
                 val ok = NotifListener.instance?.reply(key, payload.optString("text")) == true
@@ -319,6 +326,9 @@ class RelayService : Service() {
     }
 
     companion object {
+        /** Commun à toutes les connexions du processus : un id vu reste vu après une reconnexion. */
+        private val replayGuard = ReplayGuard()
+
         private const val CHANNEL_ID = "navette"
         private const val NOTIF_ID = 1
         private const val DEDUP_MS = 5_000L

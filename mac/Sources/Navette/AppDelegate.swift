@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let history = History()
     private let bridge = PhoneBridge()
     private let hotspot = Hotspot()
+    private let replayGuard = ReplayGuard()
     /// App au premier plan quand le menu s'ouvre (pour « Ouvrir l'onglet sur le téléphone »).
     private var frontBundleID: String?
 
@@ -100,6 +101,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let data = try? NavetteCrypto.openData(clip, key: keys.encKey),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             lastEvent = "↓ élément illisible (secret différent ?)"
+            return
+        }
+        // Un message déjà reçu ou trop ancien est ignoré : le serveur ne peut pas rejouer nos commandes.
+        guard replayGuard.accept(id: clip.id, t: (json["t"] as? NSNumber)?.doubleValue) else {
+            Journal.write("élément \(clip.id.prefix(8)) ignoré : rejoué ou périmé")
             return
         }
         if bridge.handle(json) { return }
@@ -411,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showPairing() {
         if pairingWindow == nil {
-            pairingWindow = PairingWindow(config: config, token: keys.token) { [weak self] in
+            pairingWindow = PairingWindow(config: config, token: keys.token, fingerprint: keys.fingerprint) { [weak self] in
                 self?.copyToken()
             }
         }

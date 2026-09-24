@@ -84,10 +84,32 @@ let storedBytes = 0;
 function roomFor(key) {
   let room = rooms.get(key);
   if (room) return room;
-  if (rooms.size >= MAX_ROOMS) return null;
+  if (rooms.size >= MAX_ROOMS && !reclaimIdleRoom()) return null;
   room = { key, name: key.slice(0, 6), sockets: new Set(), last: null, lastAt: 0, windowStart: 0, messages: 0, bytes: 0 };
   rooms.set(key, room);
   return room;
+}
+
+/**
+ * Serveur plein : libère un salon sans appareil connecté, en commençant par ceux qui ne gardent
+ * rien, puis le plus ancien dernier presse-papier. Sans cela, un seul envoi par jeton suffirait
+ * à occuper une place pendant NAVETTE_LAST_HOURS et à refuser tout nouvel appairage.
+ */
+function reclaimIdleRoom() {
+  for (const room of rooms.values()) {
+    if (room.sockets.size === 0 && !room.last) {
+      rooms.delete(room.key);
+      return true;
+    }
+  }
+  for (const room of stored) {
+    if (room.sockets.size === 0) {
+      forgetLast(room);
+      rooms.delete(room.key);
+      return true;
+    }
+  }
+  return false;
 }
 
 function forgetLast(room) {
@@ -123,7 +145,7 @@ function withinRate(room, size) {
 }
 
 function validClip(body) {
-  return body
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
     && typeof body.id === 'string' && body.id.length <= 64
     && typeof body.iv === 'string' && body.iv.length <= 64
     && typeof body.data === 'string' && body.data.length > 0 && body.data.length <= MAX_BYTES;
@@ -252,14 +274,20 @@ server.on('upgrade', (req, socket, head) => {
 
     ws.on('pong', () => { ws.alive = true; });
     ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw.toString('utf8')); } catch { return; }
-      if (msg.type !== 'clip' || !validClip(msg)) return;
-      if (!withinRate(room, msg.data.length)) {
-        if (room.messages === RATE_MESSAGES + 1) log(room, 'limite d’envois atteinte, éléments ignorés');
-        return;
+      // Une trame ne doit jamais pouvoir faire tomber le processus : il sert tous les salons.
+      try {
+        let msg;
+        try { msg = JSON.parse(raw.toString('utf8')); } catch { return; }
+        // validClip d'abord : il écarte null, les nombres, les tableaux… avant tout accès à msg.type.
+        if (!validClip(msg) || msg.type !== 'clip') return;
+        if (!withinRate(room, msg.data.length)) {
+          if (room.messages === RATE_MESSAGES + 1) log(room, 'limite d’envois atteinte, éléments ignorés');
+          return;
+        }
+        relay(room, msg, ws.device);
+      } catch (err) {
+        log(room, `message ignoré : ${err.message}`);
       }
-      relay(room, msg, ws.device);
     });
     ws.on('close', () => {
       room.sockets.delete(ws);

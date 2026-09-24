@@ -3,15 +3,24 @@
 ## Keys
 
 A 256-bit secret is generated on the Mac and shared with the phone through the pairing QR code
-(`navette://pair?u=<relay address>&s=<secret>`). Two keys are derived with HMAC-SHA256:
+(`navette://pair?u=<relay address>&s=<secret>`). Three values are derived with HMAC-SHA256:
 
 | Derivation | Known by | Purpose |
 |---|---|---|
 | `navette/auth/v1` → token | Mac, phone, **relay** | authenticates devices to the relay (`Authorization: Bearer`) |
-| `navette/enc/v1` → AES key | Mac, phone | encrypts content (AES-256-GCM, the message id is the associated data) |
+| `navette/enc/v1` → AES key | Mac, phone | encrypts content (AES-256-GCM) |
+| `navette/fingerprint/v1` → 6-digit code | Mac, phone | shown on both screens when pairing, so a forged pairing link is spotted |
 
-The relay can neither read nor alter messages. `server/tests/protocol.js` is the reference
-implementation; the Swift and Kotlin test suites decrypt vectors it produced.
+**Protocol v2.** The associated data of each message is `navette/v2|<sender>|<id>`, where the
+sender is `mac` or `phone`: a message sent back to its own sender (by the relay, for example) does
+not decrypt. Every payload carries `t`, the sender's clock in milliseconds; messages received live
+are dropped if `t` is more than 5 minutes away from the receiver's clock or if their id was already
+seen (`ReplayGuard`). `GET /api/clip/last` is only applied if it is newer than the last clip
+received. So the relay can neither read, forge, redirect nor replay messages; it can still drop or
+delay them. v1 and v2 devices cannot talk to each other: update the Mac and the phone together.
+
+`server/tests/protocol.js` is the reference implementation; the Swift and Kotlin test suites decrypt
+vectors it produced.
 
 ## Rooms
 
