@@ -170,6 +170,11 @@ hébergez votre relais (étape 2).
 
 Les trois implémentations partagent des vecteurs de test pour le chiffrement.
 
+L'app Mac est signée ad hoc : macOS redemande le Bluetooth, la localisation… après chaque
+recompilation. Lancez une fois `mac/scripts/create-signing-cert.sh` : il crée un certificat de
+signature local dans votre trousseau de session, que `build-app.sh` utilise ensuite, et macOS garde
+les autorisations d'une compilation à l'autre.
+
 ## Licence
 
 [AGPL-3.0](LICENSE). Merci de lire [CONTRIBUTING.md](CONTRIBUTING.md) avant de proposer une modification.

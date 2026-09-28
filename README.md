@@ -165,6 +165,10 @@ If you'd rather not depend on it, host your own relay (step 2).
 
 The three implementations share test vectors for the encryption. Code comments are in French.
 
+Mac builds are signed ad hoc, so macOS asks again for Bluetooth, Location… after each rebuild. Run
+`mac/scripts/create-signing-cert.sh` once: it creates a local signing certificate in your login
+keychain, which `build-app.sh` then uses, and macOS keeps the permissions across rebuilds.
+
 ## License
 
 [AGPL-3.0](LICENSE). Please read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request.

@@ -1,9 +1,14 @@
 #!/bin/zsh
-# Compile Navette et assemble Navette.app (signature ad hoc).
+# Compile Navette et assemble Navette.app.
+# Signature : le certificat « Navette (signature locale) » du trousseau s'il existe (macOS garde alors
+# les autorisations — Bluetooth, localisation… — d'une compilation à l'autre), sinon ad hoc (CI).
+# Autre certificat : NAVETTE_SIGN_IDENTITY.
 # Usage : scripts/build-app.sh [--install]   (--install copie l'app dans /Applications)
 # Version : NAVETTE_VERSION (ex. 0.2.0) et NAVETTE_BUILD (entier croissant), fixées par la CI.
 set -euo pipefail
 cd "${0:A:h}/.."
+SIGN_ID=${NAVETTE_SIGN_IDENTITY:-Navette (signature locale)}
+if ! security find-identity -p codesigning 2>/dev/null | grep -qF "\"$SIGN_ID\""; then SIGN_ID=-; fi
 VERSION=${NAVETTE_VERSION:-0.1.0}
 BUILD=${NAVETTE_BUILD:-1}
 
@@ -63,10 +68,10 @@ cp -R Controls/build/Build/Products/Release/NavetteControls.appex "$APP/Contents
 for key value in CFBundleShortVersionString "$VERSION" CFBundleVersion "$BUILD"; do
   /usr/libexec/PlistBuddy -c "Set :$key $value" "$APP/Contents/PlugIns/NavetteControls.appex/Contents/Info.plist"
 done
-codesign --force --sign - --entitlements Controls/NavetteControls.entitlements "$APP/Contents/PlugIns/NavetteControls.appex"
+codesign --force --sign "$SIGN_ID" --entitlements Controls/NavetteControls.entitlements "$APP/Contents/PlugIns/NavetteControls.appex"
 
-codesign --force --sign - "$APP"
-echo "✓ $PWD/$APP"
+codesign --force --sign "$SIGN_ID" "$APP"
+echo "✓ $PWD/$APP (signature : $([[ $SIGN_ID == - ]] && echo ad hoc || echo $SIGN_ID))"
 
 if [[ "${1:-}" == "--install" ]]; then
   pkill -x Navette || true
