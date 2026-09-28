@@ -216,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .searching: menu.addItem(disabled("○ Liaison directe : téléphone introuvable sur ce réseau"))
         }
         switch ble.state {
-        case .connected: menu.addItem(disabled("● Liaison Bluetooth avec le téléphone"))
+        case .connected: menu.addItem(disabled("● Liaison Bluetooth avec le téléphone (\(ble.transport))"))
         case .connecting: menu.addItem(disabled("◌ Bluetooth : connexion au téléphone…"))
         case .searching: menu.addItem(disabled("○ Bluetooth : téléphone hors de portée"))
         case .idle(let why) where !local.isConnected: menu.addItem(disabled("○ Bluetooth : \(why)"))

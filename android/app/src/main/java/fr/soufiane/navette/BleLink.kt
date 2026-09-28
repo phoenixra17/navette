@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
@@ -12,6 +13,8 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothServerSocket
+import android.bluetooth.BluetoothSocket
 import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -35,10 +38,11 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Liaison Bluetooth basse consommation avec le Mac, pour quand ils n'ont aucun réseau en commun
- * (voir « Bluetooth link » dans PROTOCOL.md). Le téléphone publie un service GATT et s'annonce ; le
- * Mac s'y connecte, écrit dans [TO_PHONE] et reçoit les notifications de [TO_MAC]. Les octets forment
- * le même flux de trames que la liaison Wi-Fi : [LocalLink] s'occupe de la poignée de main et des
- * messages.
+ * (voir « Bluetooth link » dans PROTOCOL.md). Le téléphone publie un service GATT et s'annonce.
+ * De préférence, le Mac lit dans [PSM] le numéro d'un canal L2CAP ouvert par le téléphone et s'y
+ * connecte : un vrai flux, bien plus rapide. Sinon, il écrit dans [TO_PHONE] et reçoit les
+ * notifications de [TO_MAC]. Dans les deux cas, les octets forment le même flux de trames que la
+ * liaison Wi-Fi : [LocalLink] s'occupe de la poignée de main et des messages.
  *
  * Indépendante de la connexion mains-libres qui déclenche le point d'accès (Bluetooth classique,
  * coupée par le Mac au bout de 15 s) : une liaison BLE n'est pas un profil connecté pour Android.
@@ -50,16 +54,21 @@ object BleLink {
     val TO_PHONE: UUID = UUID.fromString("8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a11")
     /** Le téléphone y notifie le Mac. */
     val TO_MAC: UUID = UUID.fromString("8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a12")
+    /** Numéro (PSM) du canal L2CAP, sur 2 octets gros-boutistes ; lu par le Mac. */
+    val PSM: UUID = UUID.fromString("8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a13")
     private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     private const val TAG = "NavetteBle"
 
     private var context: Context? = null
     @Volatile private var server: BluetoothGattServer? = null
     private var toMac: BluetoothGattCharacteristic? = null
+    @Volatile private var l2cap: BluetoothServerSocket? = null
     private var advertising = false
     private var receiverRegistered = false
     private val channels = ConcurrentHashMap<String, BleChannel>()
     private val mtus = ConcurrentHashMap<String, Int>()
+    /** Connexions GATT « client » vers le Mac, ouvertes pour demander un intervalle radio court. */
+    private val boosters = ConcurrentHashMap<String, BluetoothGatt>()
 
     /** Pour l'écran principal. */
     @Volatile var status: String = "arrêté"
@@ -117,6 +126,11 @@ object BleLink {
             return
         }
         server = gatt
+        // Canal L2CAP « non sécurisé » : sans appairage Bluetooth, la poignée de main Navette authentifie.
+        l2cap = runCatching { manager.adapter.listenUsingInsecureL2capChannel() }
+            .onFailure { Log.w(TAG, "canal L2CAP indisponible", it) }
+            .getOrNull()
+            ?.also { socket -> Thread({ acceptL2cap(socket) }, "navette-l2cap").start() }
         val characteristic = BluetoothGattCharacteristic(
             TO_MAC, BluetoothGattCharacteristic.PROPERTY_NOTIFY, BluetoothGattCharacteristic.PERMISSION_READ,
         ).apply {
@@ -132,6 +146,11 @@ object BleLink {
                 BluetoothGattCharacteristic.PERMISSION_WRITE,
             ))
             addCharacteristic(characteristic)
+            if (l2cap != null) {
+                addCharacteristic(BluetoothGattCharacteristic(
+                    PSM, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ,
+                ))
+            }
         }
         gatt.addService(service) // la publication commence dans onServiceAdded
     }
@@ -140,6 +159,8 @@ object BleLink {
         stopAdvertising()
         channels.values.forEach { it.close() }
         channels.clear()
+        runCatching { l2cap?.close() }
+        l2cap = null
         runCatching { server?.close() }
         server = null
         toMac = null
@@ -236,8 +257,114 @@ object BleLink {
             }
         }
 
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
+        ) {
+            val psm = l2cap?.psm
+            if (characteristic.uuid != PSM || psm == null || offset > 2) {
+                server?.sendResponse(device, requestId, BluetoothGatt.GATT_READ_NOT_PERMITTED, 0, null)
+                return
+            }
+            val value = byteArrayOf((psm shr 8).toByte(), psm.toByte())
+            server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value.copyOfRange(offset, 2))
+        }
+
+        /** Rappel masqué du SDK (même signature que dans le système) : intervalle en unités de 1,25 ms. */
+        @Suppress("unused")
+        fun onConnectionUpdated(device: BluetoothDevice, interval: Int, latency: Int, timeout: Int, status: Int) {
+            Log.i(TAG, "intervalle radio : ${interval * 1.25} ms (latence $latency, statut $status)")
+        }
+
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             channels[device.address]?.onSent()
+        }
+    }
+
+    private fun acceptL2cap(socket: BluetoothServerSocket) {
+        Log.i(TAG, "canal L2CAP ouvert (PSM ${socket.psm})")
+        while (true) {
+            val client = runCatching { socket.accept() }.getOrNull() ?: break
+            Log.i(TAG, "Mac connecté en Bluetooth (L2CAP)")
+            val device = client.remoteDevice
+            Thread({
+                boost(device)
+                LocalLink.serveBluetooth(L2capChannel(client))
+                unboost(device)
+            }, "navette-l2cap-mac").start()
+        }
+    }
+
+    /**
+     * Le Mac (central) choisit l'intervalle de connexion, souvent 30 ms : c'est lui qui limite le débit.
+     * Seul un client GATT peut demander mieux sur Android ; on en ouvre un vers le Mac, sur la liaison
+     * existante, le temps de la session.
+     */
+    private fun boost(device: BluetoothDevice) {
+        val ctx = context ?: return
+        if (boosters.containsKey(device.address)) return
+        val gatt = runCatching {
+            device.connectGatt(ctx, false, object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                        val ok = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        Log.i(TAG, "priorité haute demandée : $ok")
+                    }
+                }
+
+                @Suppress("unused")
+                fun onConnectionUpdated(gatt: BluetoothGatt, interval: Int, latency: Int, timeout: Int, status: Int) {
+                    Log.i(TAG, "intervalle radio (client) : ${interval * 1.25} ms (statut $status)")
+                }
+            }, BluetoothDevice.TRANSPORT_LE)
+        }.getOrNull() ?: return
+        boosters[device.address] = gatt
+    }
+
+    private fun unboost(device: BluetoothDevice) {
+        boosters.remove(device.address)?.let { runCatching { it.disconnect(); it.close() } }
+    }
+
+    /**
+     * Flux L2CAP : une vraie prise, mais sans délai de lecture ; un fil de garde la ferme quand
+     * rien n'arrive pendant le délai demandé.
+     */
+    private class L2capChannel(private val socket: BluetoothSocket) : LocalLink.Channel {
+        @Volatile private var lastActivity = System.currentTimeMillis()
+        @Volatile private var timeoutMs = 0
+        @Volatile private var closed = false
+
+        override val address: String = "L2CAP"
+        override val output: OutputStream = socket.outputStream
+        override val input: InputStream = object : InputStream() {
+            private val source = socket.inputStream
+
+            override fun read(): Int = source.read().also { lastActivity = System.currentTimeMillis() }
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                source.read(buffer, offset, length).also { lastActivity = System.currentTimeMillis() }
+        }
+
+        init {
+            Thread({
+                while (!closed) {
+                    Thread.sleep(1_000)
+                    val limit = timeoutMs
+                    if (limit > 0 && System.currentTimeMillis() - lastActivity > limit) {
+                        Log.i(TAG, "L2CAP : rien reçu du Mac depuis ${limit / 1000} s")
+                        close()
+                    }
+                }
+            }, "navette-l2cap-garde").apply { isDaemon = true }.start()
+        }
+
+        override fun setReadTimeout(ms: Int) {
+            lastActivity = System.currentTimeMillis()
+            timeoutMs = ms
+        }
+
+        override fun close() {
+            closed = true
+            runCatching { socket.close() }
         }
     }
 
@@ -248,7 +375,9 @@ object BleLink {
                 channel.mtu = mtus[address] ?: 23
                 Log.i(TAG, "Mac connecté en Bluetooth")
                 Thread({
+                    boost(device)
                     LocalLink.serveBluetooth(channel)
+                    unboost(device)
                     channels.remove(address, channel)
                 }, "navette-ble-mac").start()
             }
@@ -262,7 +391,7 @@ object BleLink {
         private val incoming = LinkedBlockingQueue<ByteArray>()
         private val sent = Semaphore(0)
 
-        override val address: String = "Bluetooth"
+        override val address: String = "GATT"
 
         fun feed(bytes: ByteArray) {
             if (!closed) incoming.offer(bytes.copyOf())

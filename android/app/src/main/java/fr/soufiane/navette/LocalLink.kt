@@ -73,7 +73,7 @@ object LocalLink {
     /** Pour l'écran principal : « Wi-Fi (10.0.0.4) », « Bluetooth »… */
     val description: String?
         get() = (peers[Via.WIFI] ?: peers[Via.BLUETOOTH])?.let {
-            if (it.via == Via.WIFI) "${it.via.label} (${it.channel.address})" else it.via.label
+            "${it.via.label} (${it.channel.address})"
         }
     /** Port réellement ouvert (0 si arrêté). */
     val port: Int get() = server?.localPort ?: 0

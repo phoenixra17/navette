@@ -103,19 +103,26 @@ When there is no Wi-Fi link (no shared network), the same framed stream, handsha
 over Bluetooth Low Energy, so the devices still talk with no network at all.
 
 - **The phone** runs a GATT server with service `8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a10` and
-  advertises it: `…4a11` (*to phone*, write without response) and `…4a12` (*to Mac*, notify).
+  advertises it. It also listens on an L2CAP connection-oriented channel (insecure: no Bluetooth
+  pairing, the handshake authenticates) and publishes its PSM in `…4a13` (read, 2 bytes big-endian).
   Android requires the *Nearby devices* permission (`BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT`).
-- **The Mac** scans for that service only while the Wi-Fi link is down, connects, subscribes to
-  *to Mac* and starts the handshake; a phone that fails it (another secret) is skipped for 10
-  minutes. Writes follow CoreBluetooth's flow control; the phone sends one notification at a time
-  (at most 512 bytes, Android's attribute limit) and waits for `onNotificationSent`.
+- **The Mac** scans for that service only while the Wi-Fi link is down, connects, reads the PSM and
+  opens the L2CAP channel: a plain byte stream both ways. If there is no PSM or the channel fails, it
+  falls back to GATT: `…4a11` (*to phone*, write without response, CoreBluetooth flow control) and
+  `…4a12` (*to Mac*, notify; one notification at a time, at most 512 bytes — Android's attribute
+  limit — waiting for `onNotificationSent`). Then the handshake; a phone that fails it (another
+  secret) is skipped for 10 minutes.
+- **Connection interval.** macOS picks 30 ms, which caps throughput. For the length of a session the
+  phone opens a GATT *client* connection to the Mac over the same link, only to call
+  `requestConnectionPriority(HIGH)`: macOS accepts 15 ms.
 - Android does not always drop the link when the phone ends a session, so a phone that receives
   anything but `hello` as a first frame answers `{type: "reset"}` and the Mac starts over. The Mac
   also reconnects when the phone's service changes (app restarted) or after 40 s without news
   (pings every 15 s).
-- **Throughput** is low (about 20 KB/s Mac → phone, 5 KB/s phone → Mac on a Galaxy S24), so a
-  large image (> 256 KB) goes through the relay instead when both devices are connected to it:
-  the phone reports `relay` with `battery`, the Mac with `sync`.
+- **Throughput** measured between a MacBook and a Galaxy S24, L2CAP at 15 ms: about 50 KB/s each
+  way (GATT at 30 ms: 24 KB/s Mac → phone, 5 KB/s phone → Mac). A large image (> 256 KB) still
+  goes through the relay when both devices are connected to it: the phone reports `relay` with
+  `battery`, the Mac with `sync`.
 - The link is independent of the hands-free connection used for the hotspot (Bluetooth Classic,
   closed after 15 s), and does not count as a connected device for Samsung routines: it does not
   turn the hotspot on.

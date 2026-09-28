@@ -3,13 +3,15 @@ import Foundation
 
 /// Liaison Bluetooth basse consommation avec le téléphone, quand ils n'ont aucun réseau en commun
 /// (voir « Bluetooth link » dans PROTOCOL.md). Le téléphone publie un service GATT ; le Mac le
-/// cherche, s'y connecte, écrit dans `toPhone` et reçoit les notifications de `toMac`. Les octets
-/// forment le même flux de trames que la liaison Wi-Fi, avec la même poignée de main.
+/// cherche et s'y connecte. De préférence, il lit le numéro (PSM) du canal L2CAP du téléphone et
+/// l'ouvre : un vrai flux, bien plus rapide. Sinon, il écrit dans `toPhone` et reçoit les
+/// notifications de `toMac`. Les octets forment le même flux de trames que la liaison Wi-Fi, avec
+/// la même poignée de main.
 ///
 /// Indépendante de la connexion mains-libres du point d'accès (Bluetooth classique, IOBluetooth) :
 /// celle-ci est coupée au bout de 15 s sans toucher à la liaison BLE, qui passe par CoreBluetooth.
 /// Tout se passe sur la file principale.
-public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, StreamDelegate {
     public enum State: Equatable {
         /// Pas de recherche : inutile (liaison Wi-Fi établie) ou impossible (Bluetooth éteint…).
         case idle(String)
@@ -39,11 +41,17 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     static let service = CBUUID(string: "8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a10")
     static let toPhoneUUID = CBUUID(string: "8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a11")
     static let toMacUUID = CBUUID(string: "8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a12")
+    static let psmUUID = CBUUID(string: "8f1d3c52-6a4e-4b8e-9d1b-5a7c2e0f4a13")
 
     private var keys: NavetteCrypto.Keys?
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var toPhone: CBCharacteristic?
+    private var toMac: CBCharacteristic?
+    /// Canal L2CAP ouvert : toutes les trames y passent (sinon, par GATT).
+    private var l2cap: CBL2CAPChannel?
+    /// Pour l'affichage : « L2CAP » ou « GATT ».
+    public private(set) var transport = ""
     private var parser = LinkWire.Parser()
 
     /// Poignée de main en cours : nonce du Mac, puis attente de « ready ».
@@ -109,9 +117,17 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         pingTimer?.invalidate()
         retryTimer?.invalidate()
         central?.stopScan()
+        if let l2cap {
+            for stream in [l2cap.inputStream as Stream?, l2cap.outputStream] {
+                stream?.delegate = nil
+                stream?.close()
+            }
+        }
+        l2cap = nil
         if let peripheral { central?.cancelPeripheralConnection(peripheral) }
         peripheral = nil
         toPhone = nil
+        toMac = nil
         stage = .none
         parser = LinkWire.Parser()
         let pending = outbox
@@ -175,7 +191,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard let service = peripheral.services?.first(where: { $0.uuid == Self.service }) else { return retrySoon() }
-        peripheral.discoverCharacteristics([Self.toPhoneUUID, Self.toMacUUID], for: service)
+        peripheral.discoverCharacteristics([Self.toPhoneUUID, Self.toMacUUID, Self.psmUUID], for: service)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
@@ -184,13 +200,51 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         guard let toPhone = characteristics.first(where: { $0.uuid == Self.toPhoneUUID }),
               let toMac = characteristics.first(where: { $0.uuid == Self.toMacUUID }) else { return retrySoon() }
         self.toPhone = toPhone
+        self.toMac = toMac
+        if let psm = characteristics.first(where: { $0.uuid == Self.psmUUID }) {
+            peripheral.readValue(for: psm) // suite : ouverture du canal L2CAP
+        } else {
+            useGATT()
+        }
+    }
+
+    /// Repli : les trames passent par les caractéristiques (écritures et notifications).
+    private func useGATT() {
+        guard let peripheral, let toMac else { return retrySoon() }
+        transport = "GATT"
         peripheral.setNotifyValue(true, for: toMac)
+    }
+
+    private func openL2CAP(psmValue: Data?) {
+        guard let peripheral, let bytes = psmValue, bytes.count == 2 else { return useGATT() }
+        let psm = CBL2CAPPSM(UInt16(bytes[bytes.startIndex]) << 8 | UInt16(bytes[bytes.startIndex + 1]))
+        peripheral.openL2CAPChannel(psm)
+    }
+
+    public func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        guard peripheral == self.peripheral else { return }
+        guard let channel, error == nil, let input = channel.inputStream, let output = channel.outputStream else {
+            log?("Bluetooth : canal L2CAP refusé (\(error?.localizedDescription ?? "?")), repli sur GATT")
+            return useGATT()
+        }
+        l2cap = channel
+        transport = "L2CAP"
+        for stream in [input as Stream, output] {
+            stream.delegate = self
+            stream.schedule(in: .main, forMode: .default)
+            stream.open()
+        }
+        sayHello()
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
                            error: Error?) {
         guard characteristic.uuid == Self.toMacUUID, characteristic.isNotifying else { return retrySoon() }
-        // Poignée de main : hello (Mac) → hello + preuve (téléphone) → auth (Mac) → ready.
+        sayHello()
+    }
+
+    /// Poignée de main : hello (Mac) → hello + preuve (téléphone) → auth (Mac) → ready.
+    private func sayHello() {
         let macNonce = LinkWire.nonce()
         stage = .awaitingHello(macNonce: macNonce)
         enqueue(["type": "hello", "v": 1, "nonce": macNonce], completion: nil)
@@ -200,14 +254,43 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
                            error: Error?) {
+        if characteristic.uuid == Self.psmUUID { return openL2CAP(psmValue: error == nil ? characteristic.value : nil) }
         guard characteristic.uuid == Self.toMacUUID, let value = characteristic.value else { return }
+        received(value)
+    }
+
+    private func received(_ bytes: Data) {
         lastHeard = Date()
         let messages: [[String: Any]]
-        do { messages = try parser.append(value) } catch {
+        do { messages = try parser.append(bytes) } catch {
             log?("Bluetooth : trame invalide")
             return retrySoon()
         }
         for message in messages { handle(message) }
+    }
+
+    // MARK: Flux L2CAP
+
+    public func stream(_ stream: Stream, handle event: Stream.Event) {
+        guard let l2cap, stream === l2cap.inputStream || stream === l2cap.outputStream else { return }
+        switch event {
+        case .hasBytesAvailable:
+            guard let input = stream as? InputStream else { return }
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while input.hasBytesAvailable {
+                let n = input.read(&buffer, maxLength: buffer.count)
+                if n <= 0 { break }
+                received(Data(buffer[0..<n]))
+                if self.l2cap == nil { return } // session abandonnée pendant le traitement
+            }
+        case .hasSpaceAvailable:
+            pump()
+        case .errorOccurred, .endEncountered:
+            log?("Bluetooth : canal L2CAP fermé")
+            retrySoon()
+        default:
+            break
+        }
     }
 
     private func handle(_ message: [String: Any]) {
@@ -252,7 +335,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         stage = .ready
         parser.limit = LinkWire.maxFrame
         lastHeard = Date()
-        log?("liaison Bluetooth établie")
+        log?("liaison Bluetooth établie (\(transport))")
         state = .connected
         pingTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -273,19 +356,34 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     }
 
     private func pump() {
+        if let output = l2cap?.outputStream { return pumpL2CAP(output) }
         guard let peripheral, let toPhone else { return }
         let size = max(20, peripheral.maximumWriteValueLength(for: .withoutResponse))
         while !outbox.isEmpty, peripheral.canSendWriteWithoutResponse {
             let chunk = outbox[0].data.prefix(size)
             peripheral.writeValue(Data(chunk), for: toPhone, type: .withoutResponse)
             outbox[0].data = Data(outbox[0].data.dropFirst(chunk.count))
-            if outbox[0].data.isEmpty {
-                let done = outbox.removeFirst()
-                let seconds = Date().timeIntervalSince(done.started)
-                if seconds > 2 { log?(String(format: "Bluetooth : trame écrite en %.1f s", seconds)) }
-                done.completion?(true)
-            }
+            if outbox[0].data.isEmpty { finishFrame() }
         }
+    }
+
+    private func pumpL2CAP(_ output: OutputStream) {
+        while !outbox.isEmpty, output.hasSpaceAvailable {
+            let written = outbox[0].data.withUnsafeBytes { raw in
+                output.write(raw.bindMemory(to: UInt8.self).baseAddress!, maxLength: raw.count)
+            }
+            if written < 0 { return retrySoon() }
+            if written == 0 { return }
+            outbox[0].data = Data(outbox[0].data.dropFirst(written))
+            if outbox[0].data.isEmpty { finishFrame() }
+        }
+    }
+
+    private func finishFrame() {
+        let done = outbox.removeFirst()
+        let seconds = Date().timeIntervalSince(done.started)
+        if seconds > 2 { log?(String(format: "Bluetooth : trame écrite en %.1f s (%@)", seconds, transport)) }
+        done.completion?(true)
     }
 
     public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
