@@ -38,7 +38,8 @@ Mac app (Swift, menu bar)                Android app (Kotlin)
   access token derived one-way from the secret: it can neither read nor alter anything.
 - **Direct link, no relay needed.** When the Mac and the phone share a network — same Wi-Fi, or the
   Mac on the phone's hotspot — the Mac finds the phone (Bonjour) and talks to it directly: faster,
-  and it keeps working with no internet and the relay down. Otherwise, the relay takes over.
+  and it keeps working with no internet and the relay down. With no shared network, they fall back
+  to **Bluetooth** (text is instant, images are slow). Otherwise, the relay takes over.
 - **A public test relay** is available while Navette is in preview, so you can try it without
   hosting anything (see [Install](#install)). Or **host your own** on any machine both devices can
   reach: a NAS, a Raspberry Pi, a small VPS.

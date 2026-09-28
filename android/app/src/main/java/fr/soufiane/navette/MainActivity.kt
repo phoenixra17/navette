@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var notifButton: Button
     private lateinit var phoneStatus: TextView
     private lateinit var phonePermissionButton: Button
+    private lateinit var bluetoothButton: Button
     private val stateListener: () -> Unit = { render() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -200,6 +201,13 @@ class MainActivity : Activity() {
             addView(button("Ajouter la tuile aux réglages rapides") { addTile() })
             batteryButton = button("Autoriser Navette en arrière-plan (batterie)") { askBatteryExemption() }
             addView(batteryButton)
+            bluetoothButton = button("Autoriser le Bluetooth (secours sans réseau commun)") {
+                requestPermissions(
+                    arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+                    REQUEST_BLUETOOTH,
+                )
+            }
+            addView(bluetoothButton)
             addView(button("Modifier l’adresse du serveur") { editServer() })
             addView(button("Se reconnecter") { RelayService.start(this@MainActivity, reconnect = true) })
         }
@@ -224,9 +232,10 @@ class MainActivity : Activity() {
             Relay.State.OFF -> "○ Arrêté"
         }
         server.text = "Serveur : ${settings.server}\n" + (
-            LocalLink.peerAddress?.let { "Liaison directe avec le Mac ($it) : le serveur n’est pas nécessaire." }
-                ?: "Liaison directe : Mac introuvable sur ce réseau (Wi-Fi ou point d’accès communs)."
+            LocalLink.description?.let { "Liaison directe avec le Mac : $it. Le serveur n’est pas nécessaire." }
+                ?: "Liaison directe : Mac introuvable (ni Wi-Fi commun ni Bluetooth : ${BleLink.status})."
             )
+        bluetoothButton.visibility = if (BleLink.hasPermissions(this)) View.GONE else View.VISIBLE
         val logs = AutoCopy.hasReadLogs(this)
         val overlay = AutoCopy.hasOverlay(this)
         val notifs = NotifListener.isEnabled(this)
@@ -272,7 +281,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PHONE) RelayService.refresh(this)
+        if (requestCode == REQUEST_PHONE || requestCode == REQUEST_BLUETOOTH) RelayService.refresh(this)
     }
 
     // --- Actions ---
@@ -350,5 +359,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_PHONE = 2
+        private const val REQUEST_BLUETOOTH = 3
     }
 }

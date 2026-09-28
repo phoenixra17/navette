@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var keys: NavetteCrypto.Keys!
     private let relay = Relay()
     private let local = LocalLink()
+    private let ble = BleLink()
     private let watcher = ClipboardWatcher()
     private var statusItem: NSStatusItem!
     private var pairingWindow: PairingWindow?
@@ -38,15 +39,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         relay.onState = { [weak self] state in
-            self?.updateIcon()
-            if state == .connected { self?.bridge.sync() } // le téléphone renvoie sa batterie et ses adresses
+            guard let self else { return }
+            self.updateIcon()
+            // Le téléphone renvoie sa batterie et ses adresses, et apprend si le Mac est joignable par le relais.
+            let online = state == .connected
+            if online != self.bridge.macOnRelay || online {
+                self.bridge.macOnRelay = online
+                self.bridge.sync()
+            }
         }
         local.log = { Journal.write($0) }
         local.onState = { [weak self] _ in
-            self?.updateIcon()
-            if self?.local.isConnected == true { self?.bridge.sync() }
+            guard let self else { return }
+            self.updateIcon()
+            // Le Bluetooth ne sert qu'en l'absence de réseau commun.
+            self.ble.wanted = !self.local.isConnected
+            if self.local.isConnected { self.bridge.sync() }
         }
         local.onClip = { [weak self] clip in self?.received(clip, from: "local") }
+        ble.log = { Journal.write($0) }
+        ble.onState = { [weak self] _ in
+            self?.updateIcon()
+            if self?.ble.isConnected == true { self?.bridge.sync() }
+        }
+        ble.onClip = { [weak self] clip in self?.received(clip, from: "bluetooth") }
         bridge.send = { [weak self] json in self?.sendEvent(json) }
         bridge.showNotifications = config.showsNotifications
         bridge.start()
@@ -67,6 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateIcon()
         relay.start(config: config, token: keys.token)
         local.start(keys: keys)
+        ble.start(keys: keys)
+        ble.wanted = !local.isConnected
         watcher.start()
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -108,12 +126,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transmit(clip, ephemeral: true)
     }
 
-    /// En direct si le téléphone est joignable sur le réseau local, sinon (ou en cas d'échec) par le relais.
+    /// Wi-Fi direct, sinon Bluetooth, sinon (ou en cas d'échec) relais. Une grosse image évite le
+    /// Bluetooth (quelques dizaines de Ko/s) quand le relais la porte jusqu'au téléphone.
     private func transmit(_ clip: NavetteCrypto.Clip, ephemeral: Bool = false, completion: ((Bool) -> Void)? = nil) {
-        let direct = local.send(clip, ephemeral: ephemeral) { [weak self] ok in
-            if ok { completion?(true) } else { self?.relay.send(clip, ephemeral: ephemeral, completion: completion) }
-        }
-        if !direct { relay.send(clip, ephemeral: ephemeral, completion: completion) }
+        let viaRelay = { [weak self] in self?.relay.send(clip, ephemeral: ephemeral, completion: completion) ?? () }
+        let fallback: (Bool) -> Void = { ok in if ok { completion?(true) } else { viaRelay() } }
+        let size = clip.data.utf8.count
+        let route: (String) -> Void = { if !ephemeral { Journal.write("envoi par \($0) (\(size / 1024) Ko)") } }
+        if local.send(clip, ephemeral: ephemeral, completion: fallback) { return route("Wi-Fi") }
+        let big = size > 400_000 // ≈ 256 Ko d'image, une fois en base64 et chiffrée
+        let relayCarries = relay.state == .connected && bridge.phoneOnRelay
+        if !(big && relayCarries), ble.send(clip, ephemeral: ephemeral, completion: fallback) { return route("Bluetooth") }
+        route("le relais")
+        viaRelay()
     }
 
     private func received(_ clip: NavetteCrypto.Clip, from: String) {
@@ -147,12 +172,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard flashTimer == nil else { return }
         let symbol: String
         switch relay.state {
-        case _ where local.isConnected: symbol = "arrow.left.arrow.right.circle"
+        case _ where local.isConnected || ble.isConnected: symbol = "arrow.left.arrow.right.circle"
         case .connected: symbol = "arrow.left.arrow.right.circle"
         case .connecting: symbol = "arrow.left.arrow.right.circle"
         case .disconnected, .unauthorized: symbol = "exclamationmark.circle"
         }
-        setIcon(symbol, dimmed: relay.state != .connected && !local.isConnected)
+        setIcon(symbol, dimmed: relay.state != .connected && !local.isConnected && !ble.isConnected)
     }
 
     private func setIcon(_ symbol: String, dimmed: Bool = false) {
@@ -189,6 +214,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .connected(let via): menu.addItem(disabled("● Liaison directe avec le téléphone (\(via))"))
         case .connecting: menu.addItem(disabled("◌ Liaison directe : connexion…"))
         case .searching: menu.addItem(disabled("○ Liaison directe : téléphone introuvable sur ce réseau"))
+        }
+        switch ble.state {
+        case .connected: menu.addItem(disabled("● Liaison Bluetooth avec le téléphone"))
+        case .connecting: menu.addItem(disabled("◌ Bluetooth : connexion au téléphone…"))
+        case .searching: menu.addItem(disabled("○ Bluetooth : téléphone hors de portée"))
+        case .idle(let why) where !local.isConnected: menu.addItem(disabled("○ Bluetooth : \(why)"))
+        case .idle: break
         }
         if let lastEvent { menu.addItem(disabled(lastEvent)) }
         menu.addItem(.separator())

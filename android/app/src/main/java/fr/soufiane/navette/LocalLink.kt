@@ -9,6 +9,8 @@ import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
@@ -16,38 +18,63 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Liaison directe avec le Mac, sans serveur (voir « Liaison locale » dans PROTOCOL.md).
- * Le téléphone écoute sur [PORT] et s'annonce en Bonjour (`_navette._tcp`) ; le Mac s'y connecte,
- * les deux prouvent qu'ils détiennent le secret, puis les éléments chiffrés passent comme par le relais.
- * Démarrée et arrêtée par [RelayService].
+ * Wi-Fi : le téléphone écoute sur [PORT] et s'annonce en Bonjour (`_navette._tcp`) ; le Mac s'y
+ * connecte. Bluetooth : même protocole sur une liaison BLE (voir [BleLink]). Dans les deux cas, les
+ * deux appareils prouvent qu'ils détiennent le secret, puis les éléments chiffrés passent comme par
+ * le relais. Démarrée et arrêtée par [RelayService].
  */
 object LocalLink {
+    enum class Via(val label: String) { WIFI("Wi-Fi"), BLUETOOTH("Bluetooth") }
+
+    /** Flux d'octets vers un Mac : connexion TCP ou liaison BLE. */
+    interface Channel {
+        val input: InputStream
+        val output: OutputStream
+        val address: String
+        /** Délai de lecture en millisecondes (0 = aucun). */
+        fun setReadTimeout(ms: Int)
+        fun close()
+    }
+
     const val PORT = 3201
     private const val SERVICE_TYPE = "_navette._tcp"
     private const val TAG = "NavetteLocal"
     private const val MAX_FRAME = 24 * 1024 * 1024
     private const val MAX_HANDSHAKE_FRAME = 4096
 
-    private class Peer(val socket: Socket, val output: DataOutputStream) {
-        val address: String = socket.inetAddress?.hostAddress ?: "?"
-        fun close() = runCatching { socket.close() }
+    private class Peer(val channel: Channel, val via: Via) {
+        val output = DataOutputStream(channel.output.buffered())
+        /** Écritures hors du fil principal, dans l'ordre ; une file par liaison (le BLE est lent). */
+        val writer: ExecutorService = Executors.newSingleThreadExecutor()
+        fun close() {
+            runCatching { channel.close() }
+            writer.shutdown()
+        }
     }
 
-    @Volatile private var peer: Peer? = null
+    /** Un Mac au plus par moyen de liaison : la connexion la plus récente remplace l'ancienne. */
+    private val peers = ConcurrentHashMap<Via, Peer>()
     @Volatile private var server: ServerSocket? = null
     private var nsd: NsdManager? = null
     private var registration: NsdManager.RegistrationListener? = null
-    /** Écritures hors du fil principal, dans l'ordre. */
-    private val writer = Executors.newSingleThreadExecutor()
     private val handshakes = AtomicInteger()
+    @Volatile private var keys: NavetteCrypto.Keys? = null
+    @Volatile private var onMessage: ((JSONObject) -> Unit)? = null
 
-    val isConnected: Boolean get() = peer != null
-    /** Adresse du Mac connecté, pour l'écran principal. */
-    val peerAddress: String? get() = peer?.address
+    val isConnected: Boolean get() = peers.isNotEmpty()
+    fun isConnected(via: Via): Boolean = peers.containsKey(via)
+    /** Pour l'écran principal : « Wi-Fi (10.0.0.4) », « Bluetooth »… */
+    val description: String?
+        get() = (peers[Via.WIFI] ?: peers[Via.BLUETOOTH])?.let {
+            if (it.via == Via.WIFI) "${it.via.label} (${it.channel.address})" else it.via.label
+        }
     /** Port réellement ouvert (0 si arrêté). */
     val port: Int get() = server?.localPort ?: 0
 
@@ -55,37 +82,54 @@ object LocalLink {
     @Synchronized
     fun start(context: Context, keys: NavetteCrypto.Keys, onMessage: (JSONObject) -> Unit) {
         if (server != null) return
+        this.keys = keys
+        this.onMessage = onMessage
         val socket = runCatching { ServerSocket(PORT) }
             .getOrElse { ServerSocket(0) } // port pris : n'importe lequel, Bonjour et l'annonce le donnent
         server = socket
-        Thread({ acceptLoop(socket, keys, onMessage) }, "navette-local").start()
+        Thread({ acceptLoop(socket) }, "navette-local").start()
         register(context, keys.localId, socket.localPort)
         Log.i(TAG, "à l’écoute sur le port ${socket.localPort}")
+        BleLink.start(context)
     }
 
     @Synchronized
     fun stop() {
+        BleLink.stop()
         registration?.let { runCatching { nsd?.unregisterService(it) } }
         registration = null
         runCatching { server?.close() }
         server = null
-        peer?.close()
-        peer = null
+        peers.values.forEach { it.close() }
+        peers.clear()
+        keys = null
+        onMessage = null
         Relay.notifyListeners()
     }
 
     /**
-     * Envoie une trame au Mac si la liaison est établie ; `done(false)` si l'écriture échoue
-     * (l'appelant passe alors par le relais). Renvoie false si pas de liaison.
+     * Envoie une trame au Mac si une liaison directe est établie (Wi-Fi d'abord) ; `done(false)` si
+     * l'écriture échoue (l'appelant passe alors par le relais). Renvoie false si pas de liaison.
+     * [bluetooth] : false pour éviter le BLE (grosse image alors que le relais est joignable).
      */
-    fun send(message: JSONObject, done: (Boolean) -> Unit): Boolean {
-        val target = peer ?: return false
-        writer.execute {
-            val ok = runCatching { write(target, message) }.isSuccess
-            if (!ok) drop(target)
-            done(ok)
-        }
+    fun send(message: JSONObject, bluetooth: Boolean = true, done: (Boolean) -> Unit): Boolean {
+        val target = peers[Via.WIFI] ?: peers[Via.BLUETOOTH]?.takeIf { bluetooth } ?: return false
+        runCatching {
+            target.writer.execute {
+                val result = runCatching { write(target, message) }
+                result.exceptionOrNull()?.let { Log.w(TAG, "envoi impossible (${target.via.label}) : ${it.message}") }
+                val ok = result.isSuccess
+                if (!ok) drop(target)
+                done(ok)
+            }
+        }.onFailure { return false } // liaison fermée entre-temps
         return true
+    }
+
+    /** Session sur une liaison BLE qui vient de s'ouvrir (appelé par [BleLink], sur un fil dédié). */
+    fun serveBluetooth(channel: Channel) {
+        if (!admit()) return channel.close()
+        serve(channel, Via.BLUETOOTH)
     }
 
     /** Message `local` envoyé au Mac par le relais : où joindre le téléphone quand Bonjour ne passe pas. */
@@ -134,33 +178,52 @@ object LocalLink {
 
     // --- Connexions ---
 
-    private fun acceptLoop(server: ServerSocket, keys: NavetteCrypto.Keys, onMessage: (JSONObject) -> Unit) {
+    private fun acceptLoop(server: ServerSocket) {
         while (!server.isClosed) {
             val socket = runCatching { server.accept() }.getOrNull() ?: break
-            // Quelques poignées de main à la fois au plus : un inconnu du réseau ne peut pas épuiser le téléphone.
-            if (handshakes.incrementAndGet() > 4) {
-                handshakes.decrementAndGet()
+            if (!admit()) {
                 runCatching { socket.close() }
                 continue
             }
-            Thread({ serve(socket, keys, onMessage) }, "navette-local-mac").start()
+            socket.tcpNoDelay = true
+            Thread({ serve(TcpChannel(socket), Via.WIFI) }, "navette-local-mac").start()
         }
     }
 
-    private fun serve(socket: Socket, keys: NavetteCrypto.Keys, onMessage: (JSONObject) -> Unit) {
+    /** Quelques poignées de main à la fois au plus : un inconnu ne peut pas épuiser le téléphone. */
+    private fun admit(): Boolean {
+        if (handshakes.incrementAndGet() <= 4) return true
+        handshakes.decrementAndGet()
+        return false
+    }
+
+    private class TcpChannel(private val socket: Socket) : Channel {
+        override val input: InputStream = socket.getInputStream()
+        override val output: OutputStream = socket.getOutputStream()
+        override val address: String = socket.inetAddress?.hostAddress ?: "?"
+        override fun setReadTimeout(ms: Int) { socket.soTimeout = ms }
+        override fun close() = socket.close()
+    }
+
+    private fun serve(channel: Channel, via: Via) {
         var me: Peer? = null
         try {
-            socket.tcpNoDelay = true
-            socket.soTimeout = 6_000
-            val input = DataInputStream(socket.getInputStream().buffered())
-            val output = DataOutputStream(socket.getOutputStream().buffered())
+            val keys = keys ?: throw IOException("liaison arrêtée")
+            // Le BLE est plus lent à établir (découverte des services, abonnement) : délai plus large.
+            channel.setReadTimeout(if (via == Via.WIFI) 6_000 else 20_000)
+            val input = DataInputStream(channel.input.buffered())
 
             // Poignée de main : hello (Mac) → hello + preuve (téléphone) → auth (Mac) → ready.
             val hello = read(input, MAX_HANDSHAKE_FRAME)
             val macNonce = hello.optString("nonce")
-            if (hello.optString("type") != "hello" || macNonce.length < 16) throw IOException("hello attendu")
+            if (hello.optString("type") != "hello" || macNonce.length < 16) {
+                // En Bluetooth, Android ne coupe pas toujours la liaison : le Mac écrit encore dans une
+                // session close de notre côté. On lui dit de recommencer la poignée de main.
+                if (via == Via.BLUETOOTH) runCatching { write(Peer(channel, via), JSONObject().put("type", "reset")) }
+                throw IOException("hello attendu")
+            }
             val phoneNonce = nonce()
-            val candidate = Peer(socket, output)
+            val candidate = Peer(channel, via)
             write(candidate, JSONObject()
                 .put("type", "hello").put("v", 1).put("nonce", phoneNonce)
                 .put("proof", NavetteCrypto.localProof(keys.localKey, NavetteCrypto.PHONE, macNonce, phoneNonce)))
@@ -173,33 +236,36 @@ object LocalLink {
             handshakes.decrementAndGet()
             me = candidate
 
-            // Un seul Mac à la fois : la connexion la plus récente remplace l'ancienne.
-            peer?.close()
-            peer = candidate
-            Log.i(TAG, "Mac connecté depuis ${candidate.address}")
+            peers.put(via, candidate)?.close()
+            Log.i(TAG, "Mac connecté (${via.label}, ${channel.address})")
             Relay.notifyListeners()
 
-            socket.soTimeout = 45_000 // le Mac envoie un ping toutes les 15 s
+            channel.setReadTimeout(90_000) // le Mac envoie un ping toutes les 15 s
             while (true) {
                 val message = read(input, MAX_FRAME)
                 when (message.optString("type")) {
-                    "clip" -> onMessage(message)
-                    "ping" -> writer.execute { runCatching { write(candidate, JSONObject().put("type", "pong")) } }
+                    "clip" -> {
+                        Log.i(TAG, "élément reçu (${via.label}, ${message.optString("data").length / 1024} Ko)")
+                        onMessage?.invoke(message)
+                    }
+                    "ping" -> runCatching {
+                        candidate.writer.execute { runCatching { write(candidate, JSONObject().put("type", "pong")) } }
+                    }
                 }
             }
         } catch (e: Exception) {
             if (me == null) handshakes.decrementAndGet()
-            Log.i(TAG, "connexion fermée : ${e.message}")
+            Log.i(TAG, "connexion fermée (${via.label}) : ${e.message}")
         } finally {
-            runCatching { socket.close() }
+            runCatching { channel.close() }
             if (me != null) drop(me)
         }
     }
 
     private fun drop(target: Peer) {
         target.close()
-        if (peer === target) {
-            peer = null
+        if (peers.remove(target.via, target)) {
+            Log.i(TAG, "Mac déconnecté (${target.via.label})")
             Relay.notifyListeners()
         }
     }

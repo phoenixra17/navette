@@ -15,6 +15,10 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Facultative : seulement pour afficher 5G/4G sur le Mac (voir NetworkStatus). -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Liaison Bluetooth avec le Mac quand ils n'ont aucun réseau en commun (voir BleLink). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
     <application
         android:label="Navette"

@@ -75,6 +75,7 @@ class SendActivity : Activity() {
 
     private fun deliver(app: android.content.Context, content: ClipContent?) {
         if (content == null) {
+            android.util.Log.i("NavetteLocal", "partage : rien à envoyer")
             Toast.makeText(app, "Rien à envoyer", Toast.LENGTH_SHORT).show()
             return
         }

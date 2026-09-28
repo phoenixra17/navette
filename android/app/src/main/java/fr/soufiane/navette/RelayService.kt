@@ -16,6 +16,7 @@ import android.os.BatteryManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -104,6 +105,7 @@ class RelayService : Service() {
             ACTION_RECONNECT -> reconnectNow()
             ACTION_REFRESH -> {
                 refreshAutoCopy()
+                BleLink.refresh() // l'autorisation « Appareils à proximité » vient peut-être d'être accordée
                 network.registerDisplayInfo() // l'autorisation « Téléphone » vient peut-être d'être accordée
             }
         }
@@ -217,8 +219,10 @@ class RelayService : Service() {
     }
 
     private fun lost(reason: String) {
+        val wasConnected = Relay.socket != null
         socket = null
         Relay.socket = null
+        if (wasConnected) sendBattery() // dit au Mac, par la liaison directe, que le relais est perdu
         Relay.setState(Relay.State.ERROR, reason)
         main.postDelayed(retry, retryDelayMs)
         retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000L)
@@ -243,6 +247,8 @@ class RelayService : Service() {
             "ring-stop" -> Ringer.stop(this)
             "url" -> Links.open(this, payload.optString("url"))
             "sync" -> {
+                Relay.macOnRelay = payload.optBoolean("relay", false)
+                Log.i("NavetteLocal", "sync : Mac sur le relais = ${Relay.macOnRelay}, téléphone = ${Relay.socket != null}")
                 sendBattery()
                 announceLocal()
             }
@@ -294,7 +300,10 @@ class RelayService : Service() {
                 .put("level", batteryLevel)
                 .put("charging", batteryCharging)
                 .put("net", network.label)
-                .put("signal", network.bars),
+                .put("signal", network.bars)
+                // Connecté (pas seulement en cours de connexion) : le Mac choisit alors le relais
+                // plutôt que le Bluetooth pour une grosse image.
+                .put("relay", Relay.socket != null),
             ephemeral = true,
         )
     }

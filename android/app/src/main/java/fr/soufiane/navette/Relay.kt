@@ -58,6 +58,12 @@ object Relay {
     /** WebSocket ouvert par RelayService, utilisé en priorité pour envoyer (plus rapide que HTTP). */
     @Volatile var socket: WebSocket? = null
 
+    /** Le Mac est-il connecté au relais ? (indiqué par son message `sync`) */
+    @Volatile var macOnRelay = false
+
+    /** Au-delà, une image évite le Bluetooth (lent) si le relais la porte jusqu'au Mac. */
+    private const val BLUETOOTH_MAX_BYTES = 256 * 1024
+
     /** Envoie un contenu au Mac. `done` est appelé sur le fil principal avec un message d'erreur ou null. */
     fun send(settings: Settings, content: ClipContent, done: (String?) -> Unit) =
         sendPayload(settings, content.toPayload(), ephemeral = false, done)
@@ -72,8 +78,14 @@ object Relay {
         if (ephemeral) json.put("ephemeral", true)
         // En direct si le Mac est connecté sur le réseau local ; sinon, ou en cas d'échec, par le relais.
         val frame = JSONObject(json.toString()).put("type", "clip")
-        val direct = LocalLink.send(frame) { ok ->
+        val big = payload.optString("data").length > BLUETOOTH_MAX_BYTES
+        val bluetooth = !(big && socket != null && macOnRelay)
+        val direct = LocalLink.send(frame, bluetooth) { ok ->
             if (ok) main.post { done(null) } else main.post { sendViaRelay(settings, keys, json, done) }
+        }
+        if (!ephemeral) {
+            val route = if (direct) LocalLink.description ?: "liaison directe" else "le relais"
+            android.util.Log.i("NavetteLocal", "envoi par $route (${json.optString("data").length / 1024} Ko)")
         }
         if (!direct) sendViaRelay(settings, keys, json, done)
     }

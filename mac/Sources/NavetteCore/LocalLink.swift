@@ -29,9 +29,8 @@ public final class LocalLink {
     }
 
     public static let serviceType = "_navette._tcp"
-    /// Taille maximale d'une trame (image de 16 Mo en base64 comprise), et avant authentification.
-    static let maxFrame = 24 * 1024 * 1024
-    static let maxHandshakeFrame = 4096
+    static let maxFrame = LinkWire.maxFrame
+    static let maxHandshakeFrame = LinkWire.maxHandshakeFrame
 
     private var keys: NavetteCrypto.Keys?
     private var browser: NWBrowser?
@@ -189,13 +188,13 @@ public final class LocalLink {
 
     private func sayHello(on connection: NWConnection, attempt current: Int) {
         guard let keys else { return }
-        let macNonce = Self.nonce()
+        let macNonce = LinkWire.nonce()
         write(["type": "hello", "v": 1, "nonce": macNonce], on: connection)
         readFrame(on: connection, limit: Self.maxHandshakeFrame, attempt: current) { [weak self] hello in
             guard let self, hello["type"] as? String == "hello",
                   let phoneNonce = hello["nonce"] as? String, phoneNonce.count >= 16,
                   let proof = hello["proof"] as? String,
-                  Self.same(proof, NavetteCrypto.localProof(key: keys.localKey, role: .phone,
+                  LinkWire.same(proof, NavetteCrypto.localProof(key: keys.localKey, role: .phone,
                                                             macNonce: macNonce, phoneNonce: phoneNonce))
             else {
                 self?.log?("liaison locale : téléphone non reconnu")
@@ -254,10 +253,7 @@ public final class LocalLink {
     // MARK: Trames : longueur sur 4 octets (gros-boutiste) puis JSON en UTF-8
 
     private func write(_ message: [String: Any], on connection: NWConnection, completion: ((Bool) -> Void)? = nil) {
-        guard let json = try? JSONSerialization.data(withJSONObject: message) else { completion?(false); return }
-        var frame = Data(count: 4)
-        frame.withUnsafeMutableBytes { $0.storeBytes(of: UInt32(json.count).bigEndian, as: UInt32.self) }
-        frame.append(json)
+        guard let frame = LinkWire.encode(message) else { completion?(false); return }
         connection.send(content: frame, completion: .contentProcessed { error in
             DispatchQueue.main.async { completion?(error == nil) }
         })
@@ -281,19 +277,6 @@ public final class LocalLink {
     }
 
     // MARK: Utilitaires
-
-    private static func nonce() -> String {
-        var bytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-    }
-
-    /// Comparaison en temps constant.
-    private static func same(_ a: String, _ b: String) -> Bool {
-        let x = Array(a.utf8), y = Array(b.utf8)
-        guard x.count == y.count else { return false }
-        return zip(x, y).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
-    }
 
     static func endpoint(from string: String) -> NWEndpoint? {
         guard let colon = string.lastIndex(of: ":"),
