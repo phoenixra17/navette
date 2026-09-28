@@ -67,6 +67,36 @@ Everything except `text` and `image` is sent with `ephemeral: true`: the relay f
 not keep it as the “last clipboard item” served by `GET /api/clip/last`. Unknown kinds are ignored,
 so one app can be updated before the other.
 
+## Local link
+
+When both devices share a network, they talk directly and the relay is not needed.
+
+- **The phone listens** on TCP port 3201 (any free port if taken) and advertises `_navette._tcp`
+  over Bonjour/mDNS, with a TXT record `id` = the first 6 bytes, in hex, of
+  HMAC(secret, `navette/local-id/v1`): the Mac only connects to its own phone. The phone also sends
+  `{kind: "local", port, addrs}` through the relay (Wi-Fi and hotspot addresses first, then others
+  such as Tailscale; never mobile data), so the Mac can reach it where mDNS does not pass.
+- **The Mac connects**, trying in order: `NAVETTE_LOCAL=host:port` (debugging), Bonjour results,
+  announced addresses. It retries with backoff (2 s → 60 s) and at once on wake or network change.
+- **Framing:** 4-byte big-endian length, then UTF-8 JSON. At most 4 KB per frame before
+  authentication, 24 MB after.
+- **Handshake**, with `localKey` = HMAC(secret, `navette/local/v1`) and
+  `proof(role) = base64(HMAC-SHA256(localKey, "navette/local/v1|<role>|<macNonce>|<phoneNonce>"))`:
+
+  1. Mac → `{type: "hello", v: 1, nonce: <macNonce>}` (16 random bytes, base64)
+  2. phone → `{type: "hello", v: 1, nonce: <phoneNonce>, proof: proof("phone")}`
+  3. Mac checks it, → `{type: "auth", proof: proof("mac")}`
+  4. phone checks it, → `{type: "ready"}`
+
+  A device that does not hold the secret gets nothing but a closed connection. The phone accepts
+  at most four handshakes at once and one authenticated Mac (the newest replaces the previous).
+- **Then** the same `{type: "clip", id, iv, data, ephemeral?}` messages as on the relay, still
+  encrypted end to end and checked by `ReplayGuard`, plus `ping`/`pong` every 15 s (the Mac drops
+  the link after 40 s of silence). A device sends directly when the link is up and falls back to
+  the relay if that fails.
+
+`server/tests/protocol.js` (`localProof`) holds reference vectors for both test suites.
+
 ## Automatic sending from Android
 
 Android 10+ blocks background clipboard reads. Navette works around it like KDE Connect:

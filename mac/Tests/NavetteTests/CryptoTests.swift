@@ -40,6 +40,17 @@ final class CryptoTests: XCTestCase {
         XCTAssertEqual(try NavetteCrypto.open(refMac, key: keys.encKey, from: .mac).text, "Héllo 👋 Navette")
     }
 
+    func testLocalLinkMatchesReference() throws {
+        let keys = try NavetteCrypto.deriveKeys(secret: secret)
+        XCTAssertEqual(keys.localID, "40887ecd84b3")
+        XCTAssertEqual(NavetteCrypto.localProof(key: keys.localKey, role: .phone, macNonce: "bWFjLW5vbmNl",
+                                                phoneNonce: "cGhvbmUtbm9uY2U="),
+                       "BC1+z0iTeOIAbQ28jAHhtnR00orTsTHKlQlVMIWM/P0=")
+        XCTAssertEqual(NavetteCrypto.localProof(key: keys.localKey, role: .mac, macNonce: "bWFjLW5vbmNl",
+                                                phoneNonce: "cGhvbmUtbm9uY2U="),
+                       "EusgLaWSRbBDltrLYEArMN58ELg5q44KIAVxJd5nubE=")
+    }
+
     func testReplayGuard() {
         let guardian = ReplayGuard()
         let now = Date().timeIntervalSince1970 * 1000

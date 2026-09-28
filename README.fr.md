@@ -37,6 +37,9 @@ App Mac (Swift, barre des menus)         App Android (Kotlin)
 - **Chiffrement de bout en bout.** Un secret de 256 bits est créé sur le Mac et transmis au
   téléphone par QR code. Tout est chiffré en AES-256-GCM avant de quitter un appareil. Le relais ne
   connaît qu'un jeton d'accès dérivé du secret à sens unique : il ne peut ni lire ni modifier.
+- **Liaison directe, sans relais.** Quand le Mac et le téléphone partagent un réseau — même Wi-Fi,
+  ou Mac sur le point d'accès du téléphone — le Mac trouve le téléphone (Bonjour) et lui parle en
+  direct : plus rapide, et ça marche sans internet et relais éteint. Sinon, le relais prend la main.
 - **Un relais de test public** est disponible pendant l'aperçu, pour essayer sans rien héberger
   (voir [Installation](#installation)). Ou **hébergez le vôtre** sur une machine joignable par les
   deux appareils : NAS, Raspberry Pi, petit serveur.

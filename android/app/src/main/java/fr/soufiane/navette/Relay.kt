@@ -70,6 +70,15 @@ object Relay {
         val keys = settings.keys() ?: return done("Navette n’est pas appairée")
         val json = NavetteCrypto.seal(keys.encKey, payload).toJson()
         if (ephemeral) json.put("ephemeral", true)
+        // En direct si le Mac est connecté sur le réseau local ; sinon, ou en cas d'échec, par le relais.
+        val frame = JSONObject(json.toString()).put("type", "clip")
+        val direct = LocalLink.send(frame) { ok ->
+            if (ok) main.post { done(null) } else main.post { sendViaRelay(settings, keys, json, done) }
+        }
+        if (!direct) sendViaRelay(settings, keys, json, done)
+    }
+
+    private fun sendViaRelay(settings: Settings, keys: NavetteCrypto.Keys, json: JSONObject, done: (String?) -> Unit) {
         val ws = socket
         if (ws != null && ws.send(JSONObject(json.toString()).put("type", "clip").toString())) {
             main.post { done(null) }

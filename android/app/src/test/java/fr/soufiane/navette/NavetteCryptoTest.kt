@@ -70,6 +70,20 @@ class NavetteCryptoTest {
     }
 
     @Test
+    fun localLinkMatchesReference() {
+        val keys = NavetteCrypto.deriveKeys(secret)
+        assertEquals("40887ecd84b3", keys.localId)
+        assertEquals(
+            "BC1+z0iTeOIAbQ28jAHhtnR00orTsTHKlQlVMIWM/P0=",
+            NavetteCrypto.localProof(keys.localKey, NavetteCrypto.PHONE, "bWFjLW5vbmNl", "cGhvbmUtbm9uY2U="),
+        )
+        assertEquals(
+            "EusgLaWSRbBDltrLYEArMN58ELg5q44KIAVxJd5nubE=",
+            NavetteCrypto.localProof(keys.localKey, NavetteCrypto.MAC, "bWFjLW5vbmNl", "cGhvbmUtbm9uY2U="),
+        )
+    }
+
+    @Test
     fun replayGuard() {
         val guard = ReplayGuard()
         val now = System.currentTimeMillis()

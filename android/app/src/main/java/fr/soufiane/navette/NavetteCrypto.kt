@@ -15,8 +15,17 @@ import javax.crypto.spec.SecretKeySpec
  * messages reçus en direct passent par [ReplayGuard].
  */
 object NavetteCrypto {
-    /** [fingerprint] : code à 6 chiffres affiché aussi par le Mac, pour vérifier l'appairage. */
-    class Keys(val token: String, val encKey: ByteArray, val fingerprint: String)
+    /**
+     * [fingerprint] : code à 6 chiffres affiché aussi par le Mac, pour vérifier l'appairage.
+     * [localKey] et [localId] : liaison directe sur le réseau local (voir [LocalLink]).
+     */
+    class Keys(
+        val token: String,
+        val encKey: ByteArray,
+        val fingerprint: String,
+        val localKey: ByteArray,
+        val localId: String,
+    )
 
     const val MAC = "mac"
     const val PHONE = "phone"
@@ -47,7 +56,16 @@ object NavetteCrypto {
             token = Base64.getUrlEncoder().withoutPadding().encodeToString(hmac("navette/auth/v1")),
             encKey = hmac("navette/enc/v1"),
             fingerprint = "${digits.take(3)} ${digits.takeLast(3)}",
+            localKey = hmac("navette/local/v1"),
+            localId = hmac("navette/local-id/v1").take(6).joinToString("") { "%02x".format(it) },
         )
+    }
+
+    /** Preuve de la poignée de main de la liaison locale : chacun signe les deux nonces avec son rôle. */
+    fun localProof(localKey: ByteArray, role: String, macNonce: String, phoneNonce: String): String {
+        val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(localKey, "HmacSHA256")) }
+        val digest = mac.doFinal("navette/local/v1|$role|$macNonce|$phoneNonce".toByteArray(Charsets.UTF_8))
+        return Base64.getEncoder().encodeToString(digest)
     }
 
     /** Chiffre un contenu (voir ClipContent.toPayload pour le format en clair). Le téléphone chiffre en tant que « phone ». */

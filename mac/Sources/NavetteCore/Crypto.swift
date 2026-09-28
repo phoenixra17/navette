@@ -10,6 +10,9 @@ public enum NavetteCrypto {
         public let encKey: SymmetricKey
         /// Code à 6 chiffres, affiché aussi par le téléphone, pour vérifier l'appairage.
         public let fingerprint: String
+        /// Liaison directe sur le réseau local : clé de la poignée de main et identifiant annoncé.
+        public let localKey: SymmetricKey
+        public let localID: String
     }
 
     /// Expéditeur d'un élément : un élément renvoyé à son propre expéditeur ne se déchiffre pas.
@@ -81,7 +84,15 @@ public enum NavetteCrypto {
         let digits = String(format: "%06u", n)
         return Keys(token: hmac("navette/auth/v1").base64URLEncodedString(),
                     encKey: SymmetricKey(data: hmac("navette/enc/v1")),
-                    fingerprint: "\(digits.prefix(3)) \(digits.suffix(3))")
+                    fingerprint: "\(digits.prefix(3)) \(digits.suffix(3))",
+                    localKey: SymmetricKey(data: hmac("navette/local/v1")),
+                    localID: hmac("navette/local-id/v1").prefix(6).map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// Preuve de la poignée de main de la liaison locale : chacun signe les deux nonces avec son rôle.
+    public static func localProof(key: SymmetricKey, role: Role, macNonce: String, phoneNonce: String) -> String {
+        let message = Data("navette/local/v1|\(role.rawValue)|\(macNonce)|\(phoneNonce)".utf8)
+        return Data(HMAC<SHA256>.authenticationCode(for: message, using: key)).base64EncodedString()
     }
 
     private static func aad(_ role: Role, _ id: String) -> Data {

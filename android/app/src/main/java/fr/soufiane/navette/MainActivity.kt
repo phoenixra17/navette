@@ -223,7 +223,10 @@ class MainActivity : Activity() {
             Relay.State.ERROR -> "○ Hors ligne — ${Relay.detail}"
             Relay.State.OFF -> "○ Arrêté"
         }
-        server.text = "Serveur : ${settings.server}"
+        server.text = "Serveur : ${settings.server}\n" + (
+            LocalLink.peerAddress?.let { "Liaison directe avec le Mac ($it) : le serveur n’est pas nécessaire." }
+                ?: "Liaison directe : Mac introuvable sur ce réseau (Wi-Fi ou point d’accès communs)."
+            )
         val logs = AutoCopy.hasReadLogs(this)
         val overlay = AutoCopy.hasOverlay(this)
         val notifs = NotifListener.isEnabled(this)

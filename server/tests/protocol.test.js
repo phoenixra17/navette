@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveKeys, seal, open, ReplayGuard, MAX_AGE_MS } from './protocol.js';
+import { deriveKeys, seal, open, ReplayGuard, MAX_AGE_MS, localProof } from './protocol.js';
 
 // Mêmes vecteurs que mac/Tests/NavetteTests/CryptoTests.swift et NavetteCryptoTest.kt.
 const SECRET = 'q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ';
@@ -35,4 +35,13 @@ test('anti-rejeu : un id n’est accepté qu’une fois, et seulement s’il est
   assert.equal(guard.accept('c', now + MAX_AGE_MS + 1, now), false, 'trop dans le futur');
   assert.equal(guard.accept('d', undefined, now), false, 'sans horodatage');
   assert.equal(guard.accept('e', now - 60_000, now), true, 'une minute de décalage d’horloge passe');
+});
+
+test('liaison locale : identifiant et preuves de référence', () => {
+  assert.equal(keys.localId, '40887ecd84b3');
+  const macNonce = 'bWFjLW5vbmNl';
+  const phoneNonce = 'cGhvbmUtbm9uY2U=';
+  assert.equal(localProof(keys.localKey, 'phone', macNonce, phoneNonce), 'BC1+z0iTeOIAbQ28jAHhtnR00orTsTHKlQlVMIWM/P0=');
+  assert.equal(localProof(keys.localKey, 'mac', macNonce, phoneNonce), 'EusgLaWSRbBDltrLYEArMN58ELg5q44KIAVxJd5nubE=');
+  assert.notEqual(localProof(keys.localKey, 'mac', phoneNonce, macNonce), localProof(keys.localKey, 'mac', macNonce, phoneNonce));
 });

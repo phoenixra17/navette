@@ -16,7 +16,20 @@ export function deriveKeys(secret) {
     token: hmac('navette/auth/v1').toString('base64url'),
     encKey: hmac('navette/enc/v1'),
     fingerprint: fingerprintOf(hmac('navette/fingerprint/v1')),
+    localKey: hmac('navette/local/v1'),
+    localId: hmac('navette/local-id/v1').subarray(0, 6).toString('hex'),
   };
+}
+
+/**
+ * Liaison directe sur le réseau local : preuve échangée à l'ouverture (voir PROTOCOL.md). Chacun
+ * prouve qu'il détient le secret en signant les deux nonces, précédés de son rôle.
+ */
+export function localProof(localKey, role, macNonce, phoneNonce) {
+  if (!ROLES.includes(role)) throw new Error(`rôle inconnu : ${role}`);
+  return crypto.createHmac('sha256', localKey)
+    .update(`navette/local/v1|${role}|${macNonce}|${phoneNonce}`)
+    .digest('base64');
 }
 
 /** Code à 6 chiffres affiché au Mac et au téléphone pour vérifier qu'ils partagent le même secret. */

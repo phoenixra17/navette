@@ -37,7 +37,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleURLSchemes</key><array><string>navette</string></array>
   </dict></array>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>Navette se connecte à votre serveur sur le réseau local pour partager le presse-papier avec votre téléphone.</string>
+  <string>Navette se connecte directement à votre téléphone (ou à votre serveur) sur le réseau local pour partager le presse-papier.</string>
+  <key>NSBonjourServices</key>
+  <array><string>_navette._tcp</string></array>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>Navette se connecte en Bluetooth à votre téléphone pour lui demander d’activer son point d’accès.</string>
   <key>NSLocationUsageDescription</key>

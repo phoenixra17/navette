@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var config = Config.loadOrCreate()
     private var keys: NavetteCrypto.Keys!
     private let relay = Relay()
+    private let local = LocalLink()
     private let watcher = ClipboardWatcher()
     private var statusItem: NSStatusItem!
     private var pairingWindow: PairingWindow?
@@ -38,8 +39,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         relay.onState = { [weak self] state in
             self?.updateIcon()
-            if state == .connected { self?.bridge.sync() } // le téléphone renvoie sa batterie
+            if state == .connected { self?.bridge.sync() } // le téléphone renvoie sa batterie et ses adresses
         }
+        local.log = { Journal.write($0) }
+        local.onState = { [weak self] _ in
+            self?.updateIcon()
+            if self?.local.isConnected == true { self?.bridge.sync() }
+        }
+        local.onClip = { [weak self] clip in self?.received(clip, from: "local") }
         bridge.send = { [weak self] json in self?.sendEvent(json) }
         bridge.showNotifications = config.showsNotifications
         bridge.start()
@@ -59,11 +66,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         updateIcon()
         relay.start(config: config, token: keys.token)
+        local.start(keys: keys)
         watcher.start()
 
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.relay.reconnectNow() }
+        ) { [weak self] _ in
+            self?.relay.reconnectNow()
+            self?.local.reconnectNow()
+        }
 
         // Premier lancement : le serveur n'a pas encore ce jeton, on guide tout de suite.
         if !UserDefaults.standard.bool(forKey: "setupShown") {
@@ -81,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         guard let clip = try? NavetteCrypto.seal(NavetteCrypto.Payload(content), key: keys.encKey) else { return }
-        relay.send(clip) { [weak self] ok in
+        transmit(clip) { [weak self] ok in
             guard let self else { return }
             self.lastEvent = ok ? "↑ \(content.preview)" : "↑ échec d’envoi"
             if ok {
@@ -94,7 +105,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Notification, commande… : n'écrase pas le dernier presse-papier gardé par le serveur.
     private func sendEvent(_ json: [String: Any]) {
         guard let clip = try? NavetteCrypto.seal(json: json, key: keys.encKey) else { return }
-        relay.send(clip, ephemeral: true)
+        transmit(clip, ephemeral: true)
+    }
+
+    /// En direct si le téléphone est joignable sur le réseau local, sinon (ou en cas d'échec) par le relais.
+    private func transmit(_ clip: NavetteCrypto.Clip, ephemeral: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        let direct = local.send(clip, ephemeral: ephemeral) { [weak self] ok in
+            if ok { completion?(true) } else { self?.relay.send(clip, ephemeral: ephemeral, completion: completion) }
+        }
+        if !direct { relay.send(clip, ephemeral: ephemeral, completion: completion) }
     }
 
     private func received(_ clip: NavetteCrypto.Clip, from: String) {
@@ -106,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Un message déjà reçu ou trop ancien est ignoré : le serveur ne peut pas rejouer nos commandes.
         guard replayGuard.accept(id: clip.id, t: (json["t"] as? NSNumber)?.doubleValue) else {
             Journal.write("élément \(clip.id.prefix(8)) ignoré : rejoué ou périmé")
+            return
+        }
+        if json["kind"] as? String == "local" {
+            let hosts = (json["addrs"] as? [String]) ?? []
+            local.setAnnounced(hosts: hosts, port: (json["port"] as? NSNumber)?.intValue ?? 0)
             return
         }
         if bridge.handle(json) { return }
@@ -123,11 +147,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard flashTimer == nil else { return }
         let symbol: String
         switch relay.state {
+        case _ where local.isConnected: symbol = "arrow.left.arrow.right.circle"
         case .connected: symbol = "arrow.left.arrow.right.circle"
         case .connecting: symbol = "arrow.left.arrow.right.circle"
         case .disconnected, .unauthorized: symbol = "exclamationmark.circle"
         }
-        setIcon(symbol, dimmed: relay.state != .connected)
+        setIcon(symbol, dimmed: relay.state != .connected && !local.isConnected)
     }
 
     private func setIcon(_ symbol: String, dimmed: Bool = false) {
@@ -156,10 +181,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch relay.state {
         case .connected: status = "● Connecté à \(host)"
         case .connecting: status = "◌ Connexion à \(host)…"
-        case .disconnected(let why): status = "○ Hors ligne — \(why)"
+        case .disconnected(let why): status = "○ Serveur hors ligne — \(why)"
         case .unauthorized: status = "⚠︎ Jeton refusé : mettez-le à jour sur le serveur"
         }
         menu.addItem(disabled(status))
+        switch local.state {
+        case .connected(let via): menu.addItem(disabled("● Liaison directe avec le téléphone (\(via))"))
+        case .connecting: menu.addItem(disabled("◌ Liaison directe : connexion…"))
+        case .searching: menu.addItem(disabled("○ Liaison directe : téléphone introuvable sur ce réseau"))
+        }
         if let lastEvent { menu.addItem(disabled(lastEvent)) }
         menu.addItem(.separator())
 
@@ -463,6 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func reconnect() {
         relay.reconnectNow()
+        local.reconnectNow()
     }
 
     @objc private func toggleLogin() {

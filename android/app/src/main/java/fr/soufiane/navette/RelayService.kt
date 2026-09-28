@@ -112,6 +112,8 @@ class RelayService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacks(retry)
+        LocalLink.stop()
+        localId = null
         autoCopy?.stop()
         runCatching { unregisterReceiver(batteryReceiver) }
         network.stop()
@@ -141,6 +143,7 @@ class RelayService : Service() {
             Relay.setState(Relay.State.OFF, "pas encore appairé")
             return
         }
+        startLocal(keys)
         Relay.setState(Relay.State.CONNECTING)
         socket = Relay.openSocket(settings, keys, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -150,23 +153,13 @@ class RelayService : Service() {
                     Relay.socket = webSocket
                     Relay.setState(Relay.State.CONNECTED)
                     sendBattery()
+                    announceLocal()
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val received = runCatching {
-                    val msg = JSONObject(text)
-                    if (msg.optString("type") != "clip") return
-                    val clip = NavetteCrypto.Clip.fromJson(msg)
-                    val payload = NavetteCrypto.open(keys.encKey, clip)
-                    // Déjà reçu ou trop ancien : le serveur ne peut pas rejouer une réponse ou une sonnerie.
-                    if (!replayGuard.accept(clip.id, payload.optLong("t", -1L))) return
-                    payload
-                }
-                main.post {
-                    received.onSuccess { handle(it) }
-                    received.onFailure { lastEvent = "Élément illisible (secret différent ?)"; updateNotification() }
-                }
+                val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
+                if (msg.optString("type") == "clip") receive(msg, keys)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -187,6 +180,40 @@ class RelayService : Service() {
                 }
             }
         })
+    }
+
+    /** Élément chiffré venu du Mac, par le relais ou en direct. Appelé depuis n'importe quel fil. */
+    private fun receive(msg: JSONObject, keys: NavetteCrypto.Keys) {
+        val received = runCatching {
+            val clip = NavetteCrypto.Clip.fromJson(msg)
+            val payload = NavetteCrypto.open(keys.encKey, clip)
+            // Déjà reçu ou trop ancien : le serveur ne peut pas rejouer une réponse ou une sonnerie.
+            if (!replayGuard.accept(clip.id, payload.optLong("t", -1L))) return
+            payload
+        }
+        main.post {
+            received.onSuccess { handle(it) }
+            received.onFailure { lastEvent = "Élément illisible (secret différent ?)"; updateNotification() }
+        }
+    }
+
+    // --- Liaison directe sur le réseau local (voir LocalLink) ---
+
+    private var localId: String? = null
+
+    /** Démarre l'écoute locale, ou la relance si l'appairage a changé. */
+    private fun startLocal(keys: NavetteCrypto.Keys) {
+        if (localId == keys.localId) return
+        LocalLink.stop()
+        LocalLink.start(this, keys) { msg -> receive(msg, keys) }
+        localId = keys.localId
+    }
+
+    /** Dit au Mac, par le relais, où joindre le téléphone en direct (utile si Bonjour ne passe pas). */
+    private fun announceLocal() {
+        val announcement = LocalLink.announcement() ?: return
+        if (socket == null) return
+        Relay.sendPayload(settings, announcement, ephemeral = true)
     }
 
     private fun lost(reason: String) {
@@ -215,7 +242,10 @@ class RelayService : Service() {
             "ring" -> Ringer.start(this)
             "ring-stop" -> Ringer.stop(this)
             "url" -> Links.open(this, payload.optString("url"))
-            "sync" -> sendBattery()
+            "sync" -> {
+                sendBattery()
+                announceLocal()
+            }
         }
     }
 
@@ -233,6 +263,7 @@ class RelayService : Service() {
         main.removeCallbacks(sendStatusLater)
         val wait = if (network.label != sentNetwork) 0L else (sentAt + 60_000L - System.currentTimeMillis())
         if (wait <= 0) sendBattery() else main.postDelayed(sendStatusLater, wait)
+        announceLocal() // nos adresses ont peut-être changé
     }
 
     private var batteryLevel = -1
@@ -253,7 +284,7 @@ class RelayService : Service() {
     }
 
     private fun sendBattery() {
-        if (batteryLevel < 0 || socket == null) return
+        if (batteryLevel < 0 || (socket == null && !LocalLink.isConnected)) return
         sentNetwork = network.label
         sentAt = System.currentTimeMillis()
         Relay.sendPayload(
@@ -287,7 +318,7 @@ class RelayService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val title = when (Relay.state) {
+        val title = if (LocalLink.isConnected) "Connecté au Mac en direct" else when (Relay.state) {
             Relay.State.CONNECTED -> "Connecté au Mac"
             Relay.State.CONNECTING -> "Connexion…"
             Relay.State.UNAUTHORIZED -> "Jeton refusé par le serveur"
