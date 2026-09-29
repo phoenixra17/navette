@@ -242,6 +242,7 @@ class RelayService : Service() {
                     settings, JSONObject().put("kind", "reply-result").put("key", key).put("ok", ok), ephemeral = true,
                 )
             }
+            "file", "file-end", "file-ack", "file-cancel" -> FileTransfers.receive(this, payload)
             "notif-dismiss" -> NotifListener.instance?.dismiss(payload.optString("key"))
             "ring" -> Ringer.start(this)
             "ring-stop" -> Ringer.stop(this)

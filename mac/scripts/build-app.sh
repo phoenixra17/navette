@@ -41,6 +41,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleURLName</key><string>fr.soufiane.navette</string>
     <key>CFBundleURLSchemes</key><array><string>navette</string></array>
   </dict></array>
+  <key>NSServices</key>
+  <array><dict>
+    <key>NSMenuItem</key><dict><key>default</key><string>Envoyer au téléphone (Navette)</string></dict>
+    <key>NSMessage</key><string>sendFilesService</string>
+    <key>NSPortName</key><string>Navette</string>
+    <key>NSSendFileTypes</key><array><string>public.item</string></array>
+    <key>NSRequiredContext</key><dict/>
+  </dict></array>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Navette se connecte directement à votre téléphone (ou à votre serveur) sur le réseau local pour partager le presse-papier.</string>
   <key>NSBonjourServices</key>

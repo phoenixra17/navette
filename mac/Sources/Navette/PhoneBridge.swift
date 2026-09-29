@@ -140,6 +140,15 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
         center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
+    /// Fichier reçu ou envoyé ; un clic montre `reveal` dans le Finder.
+    func notifyFile(title: String, body: String, reveal: URL?) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        if let reveal { content.userInfo = ["reveal": reveal.path] }
+        center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound])
@@ -148,7 +157,12 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         defer { completionHandler() }
-        guard let key = response.notification.request.content.userInfo["key"] as? String else { return }
+        let info = response.notification.request.content.userInfo
+        if let path = info["reveal"] as? String, response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            return
+        }
+        guard let key = info["key"] as? String else { return }
         DispatchQueue.main.async { [weak self] in
             switch response.actionIdentifier {
             case Self.replyAction:

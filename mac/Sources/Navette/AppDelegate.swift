@@ -1,8 +1,9 @@
 import AppKit
 import NavetteCore
 import ServiceManagement
+import UniformTypeIdentifiers
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSDraggingDestination {
     private var config = Config.loadOrCreate()
     private var keys: NavetteCrypto.Keys!
     private let relay = Relay()
@@ -23,6 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Au-delà, on n'envoie pas (un copier accidentel d'un énorme journal, par exemple).
     private let maxTextBytes = 1_000_000
+
+    // Fichiers (voir FileTransfer.swift) : envoyés un par un, reçus dans Téléchargements.
+    private var fileQueue: [URL] = []
+    private var fileSender: FileSender?
+    private var preparingFile = false
+    private var filesSent = 0
+    private let assembler = FileAssembler(directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("fr.soufiane.navette/Reception"))
+    private var incomingFiles: [String: (name: String, received: Int64, size: Int64)] = [:]
+    private var fileTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -81,6 +92,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         updateIcon()
+        // Fichiers déposés sur l'icône de la barre des menus (la fenêtre du bouton transmet le
+        // glisser-déposer à son délégué) et service « Envoyer au téléphone » du Finder.
+        if let window = statusItem.button?.window {
+            window.registerForDraggedTypes([.fileURL])
+            window.delegate = self
+        }
+        assembler.reply = { [weak self] json in self?.sendEvent(json) }
+        NSApp.servicesProvider = self
+        NSUpdateDynamicServices()
+        fileTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.assembler.expire().forEach { self?.fileEvent($0) }
+        }
         relay.start(config: config, token: keys.token)
         local.start(keys: keys)
         ble.start(keys: keys)
@@ -157,6 +180,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             local.setAnnounced(hosts: hosts, port: (json["port"] as? NSNumber)?.intValue ?? 0)
             return
         }
+        if let kind = json["kind"] as? String, kind.hasPrefix("file") {
+            // Accusé de réception ou refus : pour l'envoi en cours ; le reste, pour la réception.
+            if kind == "file-ack" || (kind == "file-cancel" && json["fid"] as? String == fileSender?.fid) {
+                fileSender?.handle(json)
+            } else if let event = assembler.accept(json) {
+                fileEvent(event)
+            }
+            return
+        }
         if bridge.handle(json) { return }
         guard let payload = try? JSONDecoder().decode(NavetteCrypto.Payload.self, from: data),
               let content = payload.content else { return }
@@ -164,6 +196,232 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         history.add(content, direction: .received)
         lastEvent = "↓ \(content.preview)"
         flash("arrow.down.circle.fill")
+    }
+
+    // MARK: Fichiers
+
+    /// Fichiers ou dossiers (envoyés en .zip) à envoyer au téléphone, à la suite des envois en cours.
+    func sendFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        fileQueue += urls
+        startNextFile()
+    }
+
+    private func startNextFile() {
+        guard fileSender == nil, !preparingFile else { return }
+        guard !fileQueue.isEmpty else {
+            filesSent = 0
+            return
+        }
+        let url = fileQueue.removeFirst()
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else {
+            return startFile(url, name: nil, temporary: false)
+        }
+        // Dossier : macOS le compresse (comme « Compresser » dans le Finder).
+        preparingFile = true
+        lastEvent = "↑ compression de « \(url.lastPathComponent) »…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let zip = Self.zip(url)
+            DispatchQueue.main.async {
+                self.preparingFile = false
+                if let zip {
+                    self.startFile(zip, name: url.lastPathComponent + ".zip", temporary: true)
+                } else {
+                    self.fileFailed(url.lastPathComponent, "compression impossible")
+                    self.startNextFile()
+                }
+            }
+        }
+    }
+
+    private static func zip(_ folder: URL) -> URL? {
+        var result: URL?
+        var error: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: .forUploading, error: &error) { zipped in
+            // Le .zip n'existe que dans ce bloc : on le copie.
+            let copy = FileManager.default.temporaryDirectory.appendingPathComponent("navette-\(UUID().uuidString).zip")
+            if (try? FileManager.default.copyItem(at: zipped, to: copy)) != nil { result = copy }
+        }
+        return result
+    }
+
+    /// Wi-Fi direct pour tout ; sinon le relais jusqu'à 25 Mo, puis le Bluetooth jusqu'à 2 Mo.
+    private func fileRoute(size: Int64) -> (chunk: Int, bluetooth: Bool)? {
+        if local.isConnected { return (FileChunks.chunkSize, false) }
+        if relay.state == .connected && bridge.phoneOnRelay && size <= FileChunks.maxRelayBytes {
+            return (FileChunks.chunkSize, false)
+        }
+        if ble.isConnected && size <= FileChunks.maxBluetoothBytes { return (FileChunks.bluetoothChunkSize, true) }
+        return nil
+    }
+
+    private func startFile(_ url: URL, name: String?, temporary: Bool, waited: Int = 0) {
+        let cleanup = { if temporary { try? FileManager.default.removeItem(at: url) } }
+        let displayName = name ?? url.lastPathComponent
+        let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        guard let route = fileRoute(size: size) else {
+            // App tout juste lancée (service du Finder), réveil… : on laisse aux liaisons le temps de s'établir.
+            if waited < 15 {
+                preparingFile = true
+                lastEvent = "↑ \(displayName) : en attente du téléphone…"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    self.preparingFile = false
+                    self.startFile(url, name: name, temporary: temporary, waited: waited + 1)
+                }
+                return
+            }
+            cleanup()
+            let why = local.isConnected || relay.state == .connected || ble.isConnected
+                ? "trop gros sans liaison Wi-Fi avec le téléphone (\(Self.bytes(size)))"
+                : "téléphone injoignable"
+            fileFailed(displayName, why)
+            return startNextFile()
+        }
+        let key = keys.encKey
+        let mime = UTType(filenameExtension: (displayName as NSString).pathExtension)?.preferredMIMEType
+        guard let sender = FileSender(
+            url: url, name: displayName, mime: mime, chunkSize: route.chunk,
+            seal: { try? NavetteCrypto.seal(json: $0, key: key) },
+            transmit: { [weak self] clip, done in
+                guard let self else { return done(false) }
+                self.transmitChunk(clip, fileSize: size, bluetooth: route.bluetooth, completion: done)
+            }
+        ) else {
+            cleanup()
+            fileFailed(displayName, "fichier illisible")
+            return startNextFile()
+        }
+        Journal.write("envoi du fichier « \(sender.name) » (\(Self.bytes(size)), morceaux de \(route.chunk / 1024) Ko)")
+        fileSender = sender
+        lastEvent = "↑ \(sender.name) — 0 %"
+        sender.onProgress = { [weak self, weak sender] in
+            guard let self, let sender else { return }
+            self.lastEvent = "↑ \(sender.name) — \(Self.percent(sender.sent, sender.size))"
+        }
+        sender.onFinish = { [weak self, weak sender] error in
+            guard let self, let sender else { return }
+            cleanup()
+            self.fileSender = nil
+            if let error {
+                self.fileFailed(sender.name, error)
+            } else {
+                Journal.write("fichier « \(sender.name) » envoyé, réception confirmée")
+                self.filesSent += 1
+                self.lastEvent = "↑ \(sender.name) envoyé (\(Self.bytes(sender.size)))"
+                self.flash("arrow.up.circle.fill")
+                if self.fileQueue.isEmpty {
+                    self.bridge.notifyFile(title: self.filesSent > 1 ? "\(self.filesSent) fichiers envoyés au téléphone"
+                                                                     : "Fichier envoyé au téléphone",
+                                           body: sender.name, reveal: nil)
+                }
+            }
+            self.startNextFile()
+        }
+        sender.start()
+    }
+
+    /// Même principe que `transmit`, mais un gros fichier ne se rabat jamais sur le relais.
+    private func transmitChunk(_ clip: NavetteCrypto.Clip, fileSize: Int64, bluetooth: Bool,
+                               completion: @escaping (Bool) -> Void) {
+        let viaRelay = { [weak self] in
+            guard let self, fileSize <= FileChunks.maxRelayBytes else { return completion(false) }
+            self.relay.send(clip, ephemeral: true, completion: completion)
+        }
+        let fallback: (Bool) -> Void = { ok in if ok { completion(true) } else { viaRelay() } }
+        if local.send(clip, ephemeral: true, completion: fallback) { return }
+        if bluetooth, ble.send(clip, ephemeral: true, completion: fallback) { return }
+        viaRelay()
+    }
+
+    private func fileFailed(_ name: String, _ reason: String) {
+        Journal.write("fichier « \(name) » non envoyé : \(reason)")
+        lastEvent = "↑ \(name) : \(reason)"
+        bridge.notifyFile(title: "Fichier non envoyé", body: "\(name) : \(reason)", reveal: nil)
+    }
+
+    private func fileEvent(_ event: FileAssembler.Event) {
+        switch event {
+        case .progress(let fid, let name, let received, let size):
+            if incomingFiles[fid] == nil { Journal.write("réception du fichier « \(name) » (\(Self.bytes(size)))") }
+            incomingFiles[fid] = (name, received, size)
+            lastEvent = "↓ \(name) — \(Self.percent(received, size))"
+        case .completed(let fid, let name, let url):
+            incomingFiles[fid] = nil
+            let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+            let destination = FileChunks.uniqueURL(for: name, in: downloads)
+            do {
+                try FileManager.default.moveItem(at: url, to: destination)
+            } catch {
+                try? FileManager.default.removeItem(at: url)
+                Journal.write("fichier « \(name) » : déplacement impossible (\(error))")
+                lastEvent = "↓ \(name) : impossible de l’enregistrer dans Téléchargements"
+                return
+            }
+            Journal.write("fichier reçu : \(destination.path)")
+            // Fait rebondir la pile Téléchargements du Dock, comme un téléchargement de Safari.
+            DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"),
+                                                         object: destination.resolvingSymlinksInPath().path)
+            lastEvent = "↓ \(destination.lastPathComponent) (Téléchargements)"
+            flash("arrow.down.circle.fill")
+            bridge.notifyFile(title: "Fichier reçu du téléphone", body: destination.lastPathComponent, reveal: destination)
+        case .failed(let fid, let name, let reason):
+            incomingFiles[fid] = nil
+            Journal.write("fichier « \(name) » : \(reason)")
+            lastEvent = "↓ \(name) : \(reason)"
+            bridge.notifyFile(title: "Fichier non reçu", body: "\(name) : \(reason)", reveal: nil)
+        }
+    }
+
+    private static func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
+    }
+
+    private static func percent(_ done: Int64, _ total: Int64) -> String {
+        total > 0 ? "\(Int(done * 100 / total)) %" : "100 %"
+    }
+
+    @objc private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.title = "Envoyer au téléphone"
+        panel.prompt = "Envoyer"
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+        sendFiles(panel.urls)
+    }
+
+    @objc private func cancelFiles() {
+        fileQueue.removeAll()
+        fileSender?.cancel()
+    }
+
+    /// Service du Finder (clic droit › Services › Envoyer au téléphone), déclaré dans Info.plist.
+    @objc func sendFilesService(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        sendFiles(Self.fileURLs(pboard))
+    }
+
+    private static func fileURLs(_ pboard: NSPasteboard) -> [URL] {
+        pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    // Glisser-déposer sur l'icône de la barre des menus.
+
+    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard !Self.fileURLs(sender.draggingPasteboard).isEmpty else { return [] }
+        statusItem.button?.highlight(true)
+        return .copy
+    }
+
+    func draggingExited(_ sender: NSDraggingInfo?) {
+        statusItem.button?.highlight(false)
+    }
+
+    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        statusItem.button?.highlight(false)
+        let urls = Self.fileURLs(sender.draggingPasteboard)
+        sendFiles(urls)
+        return !urls.isEmpty
     }
 
     // MARK: Icône
@@ -223,6 +481,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .idle: break
         }
         if let lastEvent { menu.addItem(disabled(lastEvent)) }
+        for file in incomingFiles.values {
+            menu.addItem(disabled("↓ \(file.name) — \(Self.percent(file.received, file.size))"))
+        }
         menu.addItem(.separator())
 
         // Comme un iPhone dans le menu Wi-Fi : nom, réseau, signal, batterie ; un clic = point d'accès.
@@ -261,6 +522,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(historyItem())
         menu.addItem(item("Envoyer le presse-papier au téléphone", #selector(sendNow)))
+        menu.addItem(item("Envoyer des fichiers au téléphone…", #selector(chooseFiles)))
+        if let sender = fileSender {
+            let waiting = fileQueue.isEmpty ? "" : " (+\(fileQueue.count) en attente)"
+            menu.addItem(item("Annuler l’envoi de « \(sender.name) »\(waiting)", #selector(cancelFiles)))
+        }
         let auto = item("Envoi automatique à chaque copie", #selector(toggleAuto))
         auto.state = config.autoSend ? .on : .off
         menu.addItem(auto)
@@ -296,8 +562,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func sendNow() {
         if let content = watcher.currentShareable() {
             send(content)
+        } else if case let urls = Self.fileURLs(NSPasteboard.general), !urls.isEmpty {
+            sendFiles(urls) // fichiers copiés dans le Finder : envoyés comme fichiers
         } else {
-            lastEvent = "↑ rien à envoyer (vide, fichier non image ou mot de passe)"
+            lastEvent = "↑ rien à envoyer (vide ou mot de passe)"
         }
     }
 

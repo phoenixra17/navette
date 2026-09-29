@@ -21,6 +21,7 @@ jump between devices — end-to-end encrypted, through a small relay you host yo
 | **Phone status** | Battery, network (5G/4G) and signal bars in the Mac menu, like an iPhone in the Wi-Fi menu. Low-battery alert. |
 | **Ring my phone** | Rings at full volume, even in silent mode. |
 | **Handoff-style links** | Phone: *Share › Open on Mac*. Mac: send the current Safari/Chrome/Arc/Brave/Edge tab, or a copied link, to the phone. |
+| **Files** | Any file or folder, either way. Mac: drop it on the menu bar icon, *Services › Send to phone (Navette)* in the Finder, or the menu. Phone: *Share › File to Mac*. Received files land in Downloads. Fast over the direct Wi-Fi link; without it, up to 25 MB through the relay. |
 | **History** | The last 10 items exchanged, in the Mac menu (memory only, never written to disk). |
 
 ## How it works

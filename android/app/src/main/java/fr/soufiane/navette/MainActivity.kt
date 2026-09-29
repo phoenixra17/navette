@@ -142,6 +142,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(button("Envoyer le presse-papier au Mac") { sendClipboard() })
             addView(button("Récupérer le dernier élément") { fetchLast() })
+            addView(button("Envoyer des fichiers au Mac…") { chooseFiles() })
 
             addView(text("Envoi automatique", 18f, bold = true).apply { setPadding(0, dp(24), 0, dp(4)) })
             autoSwitch = Switch(this@MainActivity).apply {
@@ -194,8 +195,10 @@ class MainActivity : Activity() {
                 "• Tuile « Envoyer au Mac » dans les réglages rapides : copiez, descendez le volet, touchez-la.\n" +
                     "• Sélectionnez un texte → menu ⋮ → « Envoyer au Mac ».\n" +
                     "• Partager → Navette, depuis n’importe quelle app.\n" +
+                    "• Partager un fichier (PDF, vidéo…) → « Fichier vers le Mac » : il arrive dans Téléchargements.\n" +
                     "• Partager un lien → « Ouvrir sur le Mac ».\n" +
-                    "• Ce que vous copiez sur le Mac arrive directement dans le presse-papier du téléphone.",
+                    "• Ce que vous copiez sur le Mac arrive directement dans le presse-papier du téléphone.\n" +
+                    "• Les fichiers envoyés par le Mac arrivent dans Téléchargements/Navette.",
                 14f,
             ))
             addView(button("Ajouter la tuile aux réglages rapides") { addTile() })
@@ -305,6 +308,25 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun chooseFiles() {
+        val pick = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        startActivityForResult(pick, REQUEST_FILES)
+    }
+
+    @Deprecated("Activité sans AndroidX : l'API historique suffit")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_FILES || resultCode != RESULT_OK || data == null) return
+        val uris = data.clipData?.let { clip -> (0 until clip.itemCount).map { clip.getItemAt(it).uri } }
+            ?: listOfNotNull(data.data)
+        if (uris.isEmpty()) return
+        FileTransfers.send(this, uris)
+        Toast.makeText(this, if (uris.size > 1) "Envoi de ${uris.size} fichiers au Mac…" else "Envoi au Mac…", Toast.LENGTH_SHORT).show()
+    }
+
     private fun fetchLast() {
         Relay.fetchLast(settings) { content, error ->
             if (content != null) {
@@ -360,5 +382,6 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_PHONE = 2
         private const val REQUEST_BLUETOOTH = 3
+        private const val REQUEST_FILES = 4
     }
 }

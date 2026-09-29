@@ -22,6 +22,7 @@ un petit relais que vous hébergez vous-même.
 | **État du téléphone** | Batterie, réseau (5G/4G) et barres de signal dans le menu du Mac, comme un iPhone dans le menu Wi-Fi. Alerte de batterie faible. |
 | **Faire sonner** | Sonnerie au maximum, même en mode silencieux. |
 | **Liens façon Handoff** | Téléphone : *Partager › Ouvrir sur le Mac*. Mac : envoyer l'onglet Safari/Chrome/Arc/Brave/Edge actif, ou un lien copié, au téléphone. |
+| **Fichiers** | N'importe quel fichier ou dossier, dans les deux sens. Mac : déposez-le sur l'icône de la barre des menus, *Services › Envoyer au téléphone (Navette)* dans le Finder, ou le menu. Téléphone : *Partager › Fichier vers le Mac*. Les fichiers reçus arrivent dans Téléchargements. Rapide par la liaison Wi-Fi directe ; sans elle, 25 Mo au plus par le relais. |
 | **Historique** | Les 10 derniers éléments échangés, dans le menu du Mac (en mémoire seulement, jamais écrits sur disque). |
 
 ## Fonctionnement

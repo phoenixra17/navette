@@ -66,28 +66,36 @@ object Relay {
 
     /** Envoie un contenu au Mac. `done` est appelé sur le fil principal avec un message d'erreur ou null. */
     fun send(settings: Settings, content: ClipContent, done: (String?) -> Unit) =
-        sendPayload(settings, content.toPayload(), ephemeral = false, done)
+        sendPayload(settings, content.toPayload(), ephemeral = false, done = done)
 
     /**
      * Envoie un message quelconque (voir « Protocole » dans le README). Un message éphémère
      * (notification, batterie…) n'écrase pas le dernier presse-papier gardé par le serveur.
+     * [allowBluetooth] : null = selon la taille ; [allowRelay] : false pour un gros fichier, qui
+     * échoue plutôt que de saturer le relais.
      */
-    fun sendPayload(settings: Settings, payload: JSONObject, ephemeral: Boolean, done: (String?) -> Unit = {}) {
+    fun sendPayload(
+        settings: Settings, payload: JSONObject, ephemeral: Boolean,
+        allowBluetooth: Boolean? = null, allowRelay: Boolean = true, done: (String?) -> Unit = {},
+    ) {
         val keys = settings.keys() ?: return done("Navette n’est pas appairée")
         val json = NavetteCrypto.seal(keys.encKey, payload).toJson()
         if (ephemeral) json.put("ephemeral", true)
         // En direct si le Mac est connecté sur le réseau local ; sinon, ou en cas d'échec, par le relais.
         val frame = JSONObject(json.toString()).put("type", "clip")
         val big = payload.optString("data").length > BLUETOOTH_MAX_BYTES
-        val bluetooth = !(big && socket != null && macOnRelay)
+        val bluetooth = allowBluetooth ?: !(big && socket != null && macOnRelay)
+        val relay: () -> Unit = {
+            if (allowRelay) sendViaRelay(settings, keys, json, done) else done("liaison directe avec le Mac perdue")
+        }
         val direct = LocalLink.send(frame, bluetooth) { ok ->
-            if (ok) main.post { done(null) } else main.post { sendViaRelay(settings, keys, json, done) }
+            if (ok) main.post { done(null) } else main.post(relay)
         }
         if (!ephemeral) {
             val route = if (direct) LocalLink.description ?: "liaison directe" else "le relais"
             android.util.Log.i("NavetteLocal", "envoi par $route (${json.optString("data").length / 1024} Ko)")
         }
-        if (!direct) sendViaRelay(settings, keys, json, done)
+        if (!direct) relay()
     }
 
     private fun sendViaRelay(settings: Settings, keys: NavetteCrypto.Keys, json: JSONObject, done: (String?) -> Unit) {

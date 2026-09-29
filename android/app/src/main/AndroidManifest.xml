@@ -24,6 +24,11 @@
          ClipContent.fromHtmlImage) : depuis Android 11, il faut le déclarer pour pouvoir l'ouvrir. -->
     <queries>
         <provider android:authorities="com.samsung.android.app.notes.clipdatacontentprovider" />
+        <!-- Fichier reçu du Mac : ouvert au toucher de la notification, si une app sait le faire. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
     </queries>
 
     <application
@@ -70,6 +75,23 @@
                 <action android:name="android.intent.action.PROCESS_TEXT" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <!-- Partager n'importe quel fichier (ou plusieurs) → « Fichier vers le Mac ». -->
+        <activity
+            android:name=".SendFileActivity"
+            android:exported="true"
+            android:label="Fichier vers le Mac"
+            android:theme="@style/Theme.Navette.Invisible"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 
@@ -134,6 +156,10 @@
 
         <receiver
             android:name=".StopRingReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".CancelTransferReceiver"
             android:exported="false" />
 
         <provider

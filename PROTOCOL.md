@@ -62,10 +62,43 @@ other device. Decrypted, `kind` tells what it carries:
 | `sync` | Mac → phone | (the phone answers with `battery`) |
 | `ring` / `ring-stop` | Mac → phone | |
 | `url` | ⇄ | `url` (http/https only) |
+| `file` / `file-end` / `file-ack` / `file-cancel` | ⇄ | see [Files](#files) |
 
 Everything except `text` and `image` is sent with `ephemeral: true`: the relay forwards it but does
 not keep it as the “last clipboard item” served by `GET /api/clip/last`. Unknown kinds are ignored,
 so one app can be updated before the other.
+
+## Files
+
+Any file (a folder is zipped by the Mac first) travels as a series of `file` messages, each one a
+chunk encrypted on its own like any other message, so neither side ever holds the whole file in
+memory and the relay sees nothing but ciphertext.
+
+| `kind` | From | Fields |
+|---|---|---|
+| `file` | sender | `fid` (transfer id), `name`, `size`, `mime` (optional), `off` (byte offset), `data` (base64 chunk) |
+| `file-end` | sender | `fid`, `name`, `size`, `n` (attempt number) — everything was sent |
+| `file-ack` | receiver | `fid`, `missing` (list of `[start, end)` byte ranges not received; empty = complete), `n` (echoed) |
+| `file-cancel` | either | `fid` — the sender cancelled, or the receiver gave up (bad chunk, disk, 120 s without news) |
+
+- **Pacing.** A chunk is sent once the previous one has left (TCP, Bluetooth or WebSocket write
+  done); on Android, the sender also waits while OkHttp's WebSocket queue holds more than 4 MB.
+- **Chunks** are 512 KB over Wi-Fi and the relay, 32 KB over Bluetooth (so a frame passes well within
+  the 40 s link timeout, even over GATT). Each carries its offset: the order of arrival does not
+  matter and duplicates are ignored.
+- **Acknowledgment.** A link can die silently: writes into a dead TCP connection succeed until the
+  Mac notices, up to 40 s later. So after the last chunk the sender sends `file-end` over the same
+  path, and the receiver answers `file-ack` with the ranges it lacks; the sender resends them (the
+  message router falls back to another link) and asks again, up to 10 rounds, 4 `file-end` attempts
+  of 20 s each. An ack whose `n` does not match the latest `file-end` is stale (chunks were still on
+  their way) and ignored, unless it says complete. The receiver also sends an empty `file-ack` as
+  soon as it has every byte. Only then does the sender report success.
+- **Routes.** Wi-Fi for any size (4 GB at most); without it, the relay up to 25 MB (its rate
+  limit), then Bluetooth up to 2 MB (about 50 KB/s). A file too large for the available links is
+  refused before sending, and a chunk of a large file never falls back to the relay.
+- **Received files** are assembled in a cache folder, then moved to `~/Downloads` on the Mac (`name
+  2.ext` if taken) or copied to `Download/Navette` on Android (MediaStore). The name is sanitised on
+  both sides: no path, no leading dot, no control character.
 
 ## Local link
 
