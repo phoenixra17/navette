@@ -1,5 +1,6 @@
 import AppKit
 import NavetteCore
+import QuickLookThumbnailing
 import UserNotifications
 
 /// Tout ce qui n'est pas du presse-papier : notifications du téléphone (avec réponse rapide),
@@ -34,6 +35,8 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
     private static let replyCategory = "notif-reponse"
     private static let plainCategory = "notif"
     private static let replyAction = "repondre"
+    private static let fileCategory = "fichier-recu"
+    private static let openAction = "ouvrir"
 
     func start() {
         center.delegate = self
@@ -47,6 +50,10 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
                                    options: [.customDismissAction]),
             UNNotificationCategory(identifier: Self.plainCategory, actions: [], intentIdentifiers: [],
                                    options: [.customDismissAction]),
+            UNNotificationCategory(identifier: Self.fileCategory,
+                                   actions: [UNNotificationAction(identifier: Self.openAction, title: "Ouvrir",
+                                                                  options: [.foreground])],
+                                   intentIdentifiers: [], options: []),
         ])
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             Self.log("demande d’autorisation : \(granted ? "accordée" : "refusée") \(error.map { "\($0)" } ?? "")")
@@ -149,6 +156,55 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
         center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
+    /// Fichier reçu, à la façon d'AirDrop : nom du téléphone, vignette du fichier, son d'AirDrop,
+    /// clic = afficher dans le Finder, bouton « Ouvrir ».
+    func notifyReceived(_ url: URL, from phone: String?) {
+        let content = UNMutableNotificationContent()
+        content.title = phone ?? "Téléphone"
+        content.body = url.lastPathComponent
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        if let size { content.subtitle = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file) }
+        content.userInfo = ["reveal": url.path]
+        content.categoryIdentifier = Self.fileCategory
+        content.threadIdentifier = "fichiers-recus"
+        content.sound = Self.airDropSound()
+        thumbnail(of: url) { [center] attachment in
+            if let attachment { content.attachments = [attachment] }
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
+    }
+
+    /// Le son d'AirDrop n'est pas un son d'alerte public : on le recopie une fois depuis macOS dans
+    /// ~/Library/Sounds, où les notifications vont chercher les sons nommés (rien n'est redistribué).
+    private static func airDropSound() -> UNNotificationSound {
+        let source = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/Sharing.framework/Versions/A/Resources/airdrop_invite.caf")
+        let name = "Navette AirDrop.caf"
+        let sounds = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Sounds")
+        let copy = sounds.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: copy.path) {
+            try? FileManager.default.createDirectory(at: sounds, withIntermediateDirectories: true)
+            guard (try? FileManager.default.copyItem(at: source, to: copy)) != nil else { return .default }
+        }
+        return UNNotificationSound(named: UNNotificationSoundName(name))
+    }
+
+    /// Vignette Quick Look (aperçu d'une photo, première page d'un PDF, sinon icône du type).
+    /// macOS déplace le fichier joint : on lui donne une copie PNG.
+    private func thumbnail(of url: URL, done: @escaping (UNNotificationAttachment?) -> Void) {
+        let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 256, height: 256),
+                                                   scale: 2, representationTypes: .all)
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { thumbnail, _ in
+            guard let image = thumbnail?.cgImage,
+                  let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                return done(nil)
+            }
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("navette-vignette-\(UUID().uuidString).png")
+            guard (try? png.write(to: file)) != nil else { return done(nil) }
+            done(try? UNNotificationAttachment(identifier: "vignette", url: file, options: nil))
+        }
+    }
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound])
@@ -158,8 +214,14 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         defer { completionHandler() }
         let info = response.notification.request.content.userInfo
-        if let path = info["reveal"] as? String, response.actionIdentifier == UNNotificationDefaultActionIdentifier {
-            DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+        if let path = info["reveal"] as? String {
+            let url = URL(fileURLWithPath: path)
+            switch response.actionIdentifier {
+            case Self.openAction: DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+            case UNNotificationDefaultActionIdentifier:
+                DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            default: break
+            }
             return
         }
         guard let key = info["key"] as? String else { return }

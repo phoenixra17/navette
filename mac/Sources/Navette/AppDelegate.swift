@@ -396,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                                          object: destination.resolvingSymlinksInPath().path)
             lastEvent = "↓ \(destination.lastPathComponent) (Téléchargements)"
             flash("arrow.down.circle.fill")
-            bridge.notifyFile(title: "Fichier reçu du téléphone", body: destination.lastPathComponent, reveal: destination)
+            bridge.notifyReceived(destination, from: hotspot.phoneName)
         case .failed(let fid, let name, let reason):
             incomingFiles[fid] = nil
             Journal.write("fichier « \(name) » : \(reason)")
