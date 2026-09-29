@@ -134,6 +134,12 @@ class AutoCopy(
         // Une image se lit depuis son URI (quelques Mo) : hors du fil principal.
         Thread({
             val content = ClipContent.fromClip(context, clip, skipSensitive = true)
+            val description = clip?.description
+            val types = (0 until (description?.mimeTypeCount ?: 0)).joinToString { description!!.getMimeType(it) }
+            val item = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+            Log.i(TAG, "presse-papier lu : types [$types], uri ${item?.uri?.authority ?: "aucune"}, " +
+                "texte ${item?.text != null}, html ${item?.htmlText?.let { Regex("<img[^>]*>").find(it)?.value?.take(160) ?: "sans image" }} " +
+                "→ ${content?.preview ?: "rien à envoyer"}")
             if (content != null) main.post { onContent(content) }
         }, "navette-lecture").start()
     }

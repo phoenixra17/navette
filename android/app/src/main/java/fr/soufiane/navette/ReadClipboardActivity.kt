@@ -26,6 +26,9 @@ class ReadClipboardActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        if (!done) finish() // l'utilisateur est passé à autre chose : on ne s'impose pas
+        if (!done) {
+            android.util.Log.i("NavetteAuto", "lecture abandonnée : pas de focus")
+            finish() // l'utilisateur est passé à autre chose : on ne s'impose pas
+        }
     }
 }

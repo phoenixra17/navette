@@ -20,6 +20,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
+    <!-- Samsung Notes copie une image sous forme de HTML pointant vers ce fournisseur (voir
+         ClipContent.fromHtmlImage) : depuis Android 11, il faut le déclarer pour pouvoir l'ouvrir. -->
+    <queries>
+        <provider android:authorities="com.samsung.android.app.notes.clipdatacontentprovider" />
+    </queries>
+
     <application
         android:label="Navette"
         android:icon="@mipmap/ic_launcher"

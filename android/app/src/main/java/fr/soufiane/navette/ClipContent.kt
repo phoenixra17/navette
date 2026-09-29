@@ -64,7 +64,37 @@ sealed class ClipContent {
                 if (mime != null && mime.startsWith("image/")) return fromImageUri(context, uri, mime)
             }
             val text = item.coerceToText(context)?.toString()
-            return if (text.isNullOrEmpty()) null else Text(text)
+            if (!text.isNullOrBlank()) return Text(text)
+            // Samsung Notes copie une image seule sous forme de HTML : <img src="content://…">.
+            return item.htmlText?.let { fromHtmlImage(context, it) }
+        }
+
+        private val IMG_SRC = Regex("""<img[^>]+src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+
+        /** Première image d'un fragment HTML : lien content:// ou image intégrée (data:…;base64). */
+        fun fromHtmlImage(context: Context, html: String): ClipContent? {
+            val src = IMG_SRC.find(html)?.groupValues?.get(1)?.replace("&amp;", "&") ?: return null
+            if (src.startsWith("data:image/")) {
+                val mime = src.substringAfter("data:").substringBefore(";")
+                val data = src.substringAfter("base64,", "")
+                val bytes = runCatching { android.util.Base64.decode(data, android.util.Base64.DEFAULT) }.getOrNull()
+                return bytes?.let { ImageCodec.prepare(it, mime) }
+            }
+            if (!src.startsWith("content://") && !src.startsWith("file://")) return null
+            // « content://0@autorité/… » : forme interne à Android (utilisateur 0) que ContentResolver
+            // refuse ; sans le préfixe, le fournisseur de Samsung Notes sert bien l'image.
+            val uri = Uri.parse(src).let { raw ->
+                val authority = raw.authority ?: return@let raw
+                if ('@' in authority) raw.buildUpon().encodedAuthority(authority.substringAfter('@')).build() else raw
+            }
+            val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+                ?: when (src.substringAfterLast('.').lowercase()) {
+                    "png" -> "image/png"
+                    "webp" -> "image/webp"
+                    "gif" -> "image/gif"
+                    else -> "image/jpeg"
+                }
+            return fromImageUri(context, uri, mime)
         }
 
         fun fromImageUri(context: Context, uri: Uri, mime: String): ClipContent? = runCatching {
@@ -82,7 +112,8 @@ sealed class ClipContent {
                 out.toByteArray()
             } ?: return null
             ImageCodec.prepare(bytes, mime)
-        }.getOrNull()
+        }.onFailure { android.util.Log.w("NavetteAuto", "image illisible ($mime, ${uri.authority})", it) }
+            .getOrNull()
     }
 }
 
