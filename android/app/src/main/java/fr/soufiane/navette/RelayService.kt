@@ -187,10 +187,17 @@ class RelayService : Service() {
     /** Élément chiffré venu du Mac, par le relais ou en direct. Appelé depuis n'importe quel fil. */
     private fun receive(msg: JSONObject, keys: NavetteCrypto.Keys) {
         val received = runCatching {
-            val clip = NavetteCrypto.Clip.fromJson(msg)
-            val payload = NavetteCrypto.open(keys.encKey, clip)
+            // Morceau de fichier : trame binaire en direct, ou base64 dans un élément du relais.
+            val clip = if (msg.optString("type") == "chunk") null else NavetteCrypto.Clip.fromJson(msg)
+            val json = clip?.let { runCatching { NavetteCrypto.open(keys.encKey, it) }.getOrNull() }
+            val (id, payload) = if (json != null) clip.id to json else {
+                val chunk = (msg.opt("chunk") as? NavetteCrypto.Chunk) ?: NavetteCrypto.Chunk.fromClip(clip!!)!!
+                val (meta, bytes) = NavetteCrypto.openChunk(keys.encKey, chunk)
+                if (meta.optString("kind") != "file") return
+                chunk.id to meta.put("data", bytes)
+            }
             // Déjà reçu ou trop ancien : le serveur ne peut pas rejouer une réponse ou une sonnerie.
-            if (!replayGuard.accept(clip.id, payload.optLong("t", -1L))) return
+            if (!replayGuard.accept(id, payload.optLong("t", -1L))) return
             payload
         }
         main.post {

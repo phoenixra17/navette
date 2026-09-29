@@ -98,6 +98,26 @@ object Relay {
         if (!direct) relay()
     }
 
+    /**
+     * Morceau de fichier : trame binaire sur une liaison directe, sinon (ou en cas d'échec) en base64
+     * dans un élément du relais, si [allowRelay].
+     */
+    fun sendChunk(
+        settings: Settings, meta: JSONObject, bytes: ByteArray, allowBluetooth: Boolean, allowRelay: Boolean,
+        done: (String?) -> Unit,
+    ) {
+        val keys = settings.keys() ?: return done("Navette n’est pas appairée")
+        val chunk = NavetteCrypto.sealChunk(keys.encKey, meta, bytes)
+        val relay: () -> Unit = {
+            if (allowRelay) sendViaRelay(settings, keys, chunk.toClip().toJson().put("ephemeral", true), done)
+            else done("liaison directe avec le Mac perdue")
+        }
+        val direct = LocalLink.sendChunk(chunk, allowBluetooth) { ok ->
+            if (ok) main.post { done(null) } else main.post(relay)
+        }
+        if (!direct) relay()
+    }
+
     private fun sendViaRelay(settings: Settings, keys: NavetteCrypto.Keys, json: JSONObject, done: (String?) -> Unit) {
         val ws = socket
         if (ws != null && ws.send(JSONObject(json.toString()).put("type", "clip").toString())) {

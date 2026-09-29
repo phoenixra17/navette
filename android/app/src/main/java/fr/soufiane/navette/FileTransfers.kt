@@ -123,22 +123,15 @@ object FileTransfers {
         if (size > MAX_BYTES) return "trop gros (plus de 4 Go)"
         val mime = resolver.getType(uri)
 
-        // Wi-Fi direct pour tout ; sinon le relais jusqu'à 25 Mo, puis le Bluetooth jusqu'à 2 Mo.
-        val relayCarries = Relay.socket != null && Relay.macOnRelay && size <= MAX_RELAY_BYTES
-        val (chunk, bluetooth) = when {
-            LocalLink.isConnected(LocalLink.Via.WIFI) -> CHUNK to false
-            relayCarries -> CHUNK to false
-            LocalLink.isConnected(LocalLink.Via.BLUETOOTH) && size <= MAX_BLUETOOTH_BYTES -> BLUETOOTH_CHUNK to true
-            LocalLink.isConnected || Relay.socket != null ->
-                return "trop gros sans liaison Wi-Fi avec le Mac (${formatSize(size)})"
-            else -> return "Mac injoignable"
-        }
+        val (chunk, _) = route(size) ?: return if (LocalLink.isConnected || Relay.socket != null) {
+            "trop gros sans liaison Wi-Fi avec le Mac (${formatSize(size)})"
+        } else "Mac injoignable"
         Log.i(TAG, "envoi de « $name » (${formatSize(size)}, morceaux de ${chunk / 1024} Ko)")
         val fid = UUID.randomUUID().toString()
         val inbox = java.util.concurrent.LinkedBlockingQueue<JSONObject>()
         replies[fid] = inbox
         try {
-            val link = Link(context, settings, uri, fid, name, size, mime, chunk, bluetooth, allowRelay = size <= MAX_RELAY_BYTES)
+            val link = Link(context, settings, uri, fid, name, size, mime, allowRelay = size <= MAX_RELAY_BYTES)
             var ranges = listOf(0L to size)
             var rounds = 0
             while (true) {
@@ -150,7 +143,8 @@ object FileTransfers {
                     // Même chemin que les morceaux : il arrive après eux. `n` identifie la réponse.
                     val n = rounds * 100 + attempt
                     Relay.sendPayload(settings, JSONObject().put("kind", "file-end").put("fid", fid)
-                        .put("name", name).put("size", size).put("n", n), ephemeral = true, allowBluetooth = bluetooth)
+                        .put("name", name).put("size", size).put("n", n), ephemeral = true,
+                        allowBluetooth = route(size)?.second ?: true)
                     val deadline = System.currentTimeMillis() + ACK_TIMEOUT_S * 1000
                     while (answer == null) {
                         val wait = deadline - System.currentTimeMillis()
@@ -184,10 +178,22 @@ object FileTransfers {
         }
     }
 
+    /**
+     * Wi-Fi direct pour tout ; sinon le relais jusqu'à 25 Mo, puis le Bluetooth jusqu'à 2 Mo. Taille
+     * des morceaux et Bluetooth permis ou non ; null = aucun chemin pour l'instant. Réévalué à chaque
+     * morceau : relais perdu en route → Bluetooth, Wi-Fi retrouvé…
+     */
+    private fun route(size: Long): Pair<Int, Boolean>? = when {
+        LocalLink.isConnected(LocalLink.Via.WIFI) -> CHUNK to false
+        Relay.socket != null && Relay.macOnRelay && size <= MAX_RELAY_BYTES -> CHUNK to false
+        LocalLink.isConnected(LocalLink.Via.BLUETOOTH) && size <= MAX_BLUETOOTH_BYTES -> BLUETOOTH_CHUNK to true
+        else -> null
+    }
+
     /** Envoi des morceaux d'un fichier (et renvoi des plages perdues). */
     private class Link(
         val context: Context, val settings: Settings, val uri: Uri, val fid: String, val name: String,
-        val size: Long, val mime: String?, val chunk: Int, val bluetooth: Boolean, val allowRelay: Boolean,
+        val size: Long, val mime: String?, val allowRelay: Boolean,
     ) {
         private var sent = 0L
         private var lastNotified = 0L
@@ -208,22 +214,30 @@ object FileTransfers {
                     skipped += n
                 }
                 var offset = start
-                val buffer = ByteArray(chunk)
+                val buffer = ByteArray(CHUNK)
                 do { // un fichier vide part quand même en un morceau vide
                     if (cancelled) return cancel()
-                    val wanted = minOf(chunk.toLong(), end - offset).toInt()
+                    var retries = 0
+                    var path = route(size)
+                    while (path == null) {
+                        // Liaison qui change (relais perdu, Bluetooth en cours de connexion) : on attend un moment.
+                        if (++retries > MAX_RETRIES || cancelled) return "liaison perdue"
+                        Thread.sleep(2_000)
+                        path = route(size)
+                    }
+                    val wanted = minOf(path.first.toLong(), end - offset).toInt()
                     val n = readFully(input, buffer, wanted)
                     if (n < wanted) return "fichier modifié pendant l’envoi"
-                    val payload = JSONObject()
+                    val meta = JSONObject()
                         .put("kind", "file").put("fid", fid).put("name", name).put("size", size).put("off", offset)
-                        .put("data", Base64.getEncoder().encodeToString(if (n == buffer.size) buffer else buffer.copyOf(n)))
-                    if (mime != null) payload.put("mime", mime)
-                    var retries = 0
+                    if (mime != null) meta.put("mime", mime)
+                    // Chiffré aussitôt (copie) : le tampon peut resservir au morceau suivant.
+                    val bytes = if (n == buffer.size) buffer else buffer.copyOf(n)
                     while (true) {
-                        val error = sendAndWait(settings, payload, bluetooth, allowRelay) ?: break
-                        // Liaison qui change (Wi-Fi perdu, Bluetooth en cours de connexion) : on réessaie un moment.
+                        val error = sendAndWait(settings, meta, bytes, path!!.second, allowRelay) ?: break
                         if (++retries > MAX_RETRIES || cancelled) return error
                         Thread.sleep(2_000)
+                        path = route(size) ?: path
                     }
                     offset += n
                     sent = minOf(size, sent + n)
@@ -246,10 +260,10 @@ object FileTransfers {
     }
 
     /** Envoie un morceau et attend qu'il soit parti : pas de file d'attente de plusieurs Go. */
-    private fun sendAndWait(settings: Settings, payload: JSONObject, bluetooth: Boolean, allowRelay: Boolean): String? {
+    private fun sendAndWait(settings: Settings, meta: JSONObject, bytes: ByteArray, bluetooth: Boolean, allowRelay: Boolean): String? {
         val latch = CountDownLatch(1)
         var error: String? = null
-        Relay.sendPayload(settings, payload, ephemeral = true, allowBluetooth = bluetooth, allowRelay = allowRelay) {
+        Relay.sendChunk(settings, meta, bytes, allowBluetooth = bluetooth, allowRelay = allowRelay) {
             error = it
             latch.countDown()
         }
@@ -271,24 +285,62 @@ object FileTransfers {
 
     // --- Réception : fichiers réassemblés dans le cache, puis copiés dans Téléchargements ---
 
+    /**
+     * Plages d'octets reçues, fusionnées : des morceaux de tailles différentes (le chemin, donc la
+     * taille des morceaux, peut changer en cours d'envoi) qui se chevauchent ne comptent qu'une fois.
+     */
+    class Coverage {
+        /** Début → fin, plages disjointes [début, fin). */
+        private val ranges = java.util.TreeMap<Long, Long>()
+        var total = 0L
+            private set
+
+        /** Ajoute [start, end) ; renvoie le nombre d'octets nouveaux. */
+        fun add(start: Long, end: Long): Long {
+            if (end <= start) return 0
+            var lower = start
+            var upper = end
+            var overlap = 0L
+            // Plages qui chevauchent ou touchent [start, end).
+            val touching = ranges.subMap(ranges.floorKey(start) ?: start, true, end, true)
+                .entries.filter { it.value >= start }.map { it.key to it.value }
+            for ((a, b) in touching) {
+                overlap += maxOf(0L, minOf(b, end) - maxOf(a, start))
+                lower = minOf(lower, a)
+                upper = maxOf(upper, b)
+                ranges.remove(a)
+            }
+            ranges[lower] = upper
+            val added = (end - start) - overlap
+            total += added
+            return added
+        }
+
+        fun missing(size: Long): List<List<Long>> {
+            val gaps = mutableListOf<List<Long>>()
+            var cursor = 0L
+            for ((a, b) in ranges) {
+                if (a > cursor) gaps += listOf(cursor, a)
+                cursor = maxOf(cursor, b)
+            }
+            if (cursor < size) gaps += listOf(cursor, size)
+            return gaps
+        }
+    }
+
     private class Incoming(val name: String, val size: Long, val mime: String?, val file: File, val out: RandomAccessFile) {
-        /** Décalage → longueur des morceaux reçus. */
-        val chunks = java.util.TreeMap<Long, Int>()
-        var received = 0L
+        val coverage = Coverage()
+        /** Pour un fichier vide : son unique morceau (vide) est arrivé. */
+        var sawEmpty = false
+        val received: Long get() = coverage.total
         var lastChunk = System.currentTimeMillis()
         var lastNotified = 0L
         val notifId = 100 + (file.name.hashCode() and 0xffff)
 
         /** Plages [début, fin) pas encore reçues. */
         fun missing(): List<List<Long>> {
-            val ranges = mutableListOf<List<Long>>()
-            var cursor = 0L
-            for ((offset, length) in chunks) {
-                if (offset > cursor) ranges += listOf(cursor, offset)
-                cursor = maxOf(cursor, offset + length)
-            }
-            if (cursor < size || chunks.isEmpty()) ranges += listOf(cursor, size)
-            return ranges.take(MAX_MISSING_RANGES)
+            if (size == 0L) return if (sawEmpty) emptyList() else listOf(listOf(0L, 0L))
+            return coverage.missing(size).take(MAX_MISSING_RANGES)
         }
     }
 
@@ -345,7 +397,9 @@ object FileTransfers {
         }
         val size = payload.optLong("size", -1)
         val offset = payload.optLong("off", -1)
-        val data = runCatching { Base64.getDecoder().decode(payload.getString("data")) }.getOrNull()
+        // Octets bruts (morceau binaire) ou base64.
+        val data = payload.opt("data") as? ByteArray
+            ?: runCatching { Base64.getDecoder().decode(payload.getString("data")) }.getOrNull()
         val known = incoming[fid]
         if (size !in 0..MAX_BYTES || offset < 0 || data == null || offset + data.size > size || (known != null && known.size != size)) {
             known?.let { fail(context, fid, it, "morceau invalide") }
@@ -362,11 +416,11 @@ object FileTransfers {
             }
         }
         transfer.lastChunk = System.currentTimeMillis()
-        if (transfer.chunks.containsKey(offset)) return // doublon (renvoi d'un morceau arrivé en retard)
-        transfer.chunks[offset] = data.size
         transfer.out.seek(offset)
-        transfer.out.write(data)
-        transfer.received += data.size
+        transfer.out.write(data) // un chevauchement réécrit les mêmes octets
+        val added = transfer.coverage.add(offset, offset + data.size)
+        if (size == 0L) transfer.sawEmpty = true
+        if (added == 0L && size > 0) return // doublon (renvoi d'un morceau arrivé en retard)
         if (transfer.received < size) {
             val now = System.currentTimeMillis()
             if (now - transfer.lastNotified > 500) {

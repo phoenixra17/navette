@@ -66,6 +66,61 @@ public enum NavetteCrypto {
 
     public enum Failure: Error { case badSecret, badClip }
 
+    /// Morceau de fichier au format binaire (voir « Binary chunks » dans PROTOCOL.md) : en clair,
+    /// 4 octets de longueur, les métadonnées en JSON, puis les octets bruts. Sur une liaison directe,
+    /// il circule tel quel dans une trame binaire ; par le relais, en base64 dans un `Clip`.
+    public struct Chunk: Equatable {
+        public let id: String
+        public let iv: Data
+        /// Chiffré ‖ tag.
+        public let box: Data
+
+        public init(id: String, iv: Data, box: Data) {
+            self.id = id
+            self.iv = iv
+            self.box = box
+        }
+
+        /// Un `Clip` venu du relais qui n'est pas du JSON est peut-être un morceau binaire.
+        public init?(clip: Clip) {
+            guard let iv = Data(base64Encoded: clip.iv), let box = Data(base64Encoded: clip.data) else { return nil }
+            self.init(id: clip.id, iv: iv, box: box)
+        }
+
+        public var clip: Clip { Clip(id: id, iv: iv.base64EncodedString(), data: box.base64EncodedString()) }
+    }
+
+    private static func aadBinary(_ role: Role, _ id: String) -> Data {
+        Data("navette/v2b|\(role.rawValue)|\(id)".utf8)
+    }
+
+    public static func sealChunk(meta: [String: Any], bytes: Data, key: SymmetricKey, as role: Role = .mac,
+                                 id: String = UUID().uuidString.lowercased()) throws -> Chunk {
+        var meta = meta
+        meta["t"] = (Date().timeIntervalSince1970 * 1000).rounded()
+        let json = try JSONSerialization.data(withJSONObject: meta)
+        var plaintext = Data(capacity: 4 + json.count + bytes.count)
+        withUnsafeBytes(of: UInt32(json.count).bigEndian) { plaintext.append(contentsOf: $0) }
+        plaintext.append(json)
+        plaintext.append(bytes)
+        let nonce = AES.GCM.Nonce()
+        let box = try AES.GCM.seal(plaintext, using: key, nonce: nonce, authenticating: aadBinary(role, id))
+        return Chunk(id: id, iv: nonce.withUnsafeBytes { Data($0) }, box: box.ciphertext + box.tag)
+    }
+
+    public static func openChunk(_ chunk: Chunk, key: SymmetricKey, from role: Role = .phone) throws -> (meta: [String: Any], bytes: Data) {
+        guard chunk.box.count > 16 else { throw Failure.badClip }
+        let sealed = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: chunk.iv),
+                                           ciphertext: chunk.box.dropLast(16), tag: chunk.box.suffix(16))
+        let plaintext = try AES.GCM.open(sealed, using: key, authenticating: aadBinary(role, chunk.id))
+        guard plaintext.count >= 4 else { throw Failure.badClip }
+        let length = Int(plaintext.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) })
+        guard 4 + length <= plaintext.count,
+              let meta = try JSONSerialization.jsonObject(with: plaintext.subdata(in: plaintext.startIndex + 4 ..< plaintext.startIndex + 4 + length)) as? [String: Any]
+        else { throw Failure.badClip }
+        return (meta, plaintext.subdata(in: plaintext.startIndex + 4 + length ..< plaintext.endIndex))
+    }
+
     public static func newSecret() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)

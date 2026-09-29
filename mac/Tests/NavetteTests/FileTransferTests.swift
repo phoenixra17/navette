@@ -13,6 +13,81 @@ final class FileTransferTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// Ce que reçoit le téléphone : message JSON, ou morceau binaire passé par une trame (comme sur
+    /// une liaison directe) puis déchiffré.
+    static func decode(_ outgoing: FileOutgoing, _ keys: NavetteCrypto.Keys) -> [String: Any] {
+        switch outgoing {
+        case .message(let clip):
+            return try! NavetteCrypto.openJSON(clip, key: keys.encKey, from: .phone)
+        case .chunk(let chunk):
+            var parser = LinkWire.Parser()
+            parser.limit = LinkWire.maxFrame
+            let received = try! parser.append(LinkWire.encode(chunk)!)[0]["chunk"] as! NavetteCrypto.Chunk
+            XCTAssertEqual(received, chunk)
+            let (meta, bytes) = try! NavetteCrypto.openChunk(received, key: keys.encKey, from: .phone)
+            return meta.merging(["data": bytes]) { $1 }
+        }
+    }
+
+    /// Vecteur produit par server/tests/protocol.js (sealBinary).
+    func testOpensReferenceChunk() throws {
+        let keys = try NavetteCrypto.deriveKeys(secret: "q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ")
+        let chunk = NavetteCrypto.Chunk(
+            id: "vecteur-binaire", iv: Data([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+            box: try XCTUnwrap(Data(base64Encoded: "kPxGVlEPxme7U89aWoEcmUdfL9BccFQahZXH+HfoapHETk8wLVAPesK5TCgqXULFMxJkk/Oxn7IRB5N+ogyXCpFOKClRbexALD6GvtSAuyGWsKoUyN+uFllGlPxBia1Sr3Cl+J61sVxh+xcvfWNkQPtoblc=")))
+        let (meta, bytes) = try NavetteCrypto.openChunk(chunk, key: keys.encKey, from: .phone)
+        XCTAssertEqual(meta["name"] as? String, "é.bin")
+        XCTAssertEqual((meta["t"] as? NSNumber)?.int64Value, 1_790_000_000_000)
+        XCTAssertEqual(bytes, Data([0, 1, 2, 250, 251, 255]))
+        XCTAssertThrowsError(try NavetteCrypto.openChunk(chunk, key: keys.encKey, from: .mac))
+        // Un morceau binaire ne se lit pas comme un élément JSON.
+        XCTAssertThrowsError(try NavetteCrypto.openData(chunk.clip, key: keys.encKey, from: .phone))
+        XCTAssertEqual(NavetteCrypto.Chunk(clip: chunk.clip), chunk)
+    }
+
+    func testBinaryFramesMixWithJSON() throws {
+        let chunk = NavetteCrypto.Chunk(id: "abc", iv: Data(repeating: 7, count: 12), box: Data((0..<3000).map { UInt8($0 % 256) }))
+        var stream = LinkWire.encode(["type": "ping"])!
+        stream += LinkWire.encode(chunk)!
+        stream += LinkWire.encode(["type": "pong"])!
+        var parser = LinkWire.Parser()
+        parser.limit = LinkWire.maxFrame
+        var messages: [[String: Any]] = []
+        for start in stride(from: 0, to: stream.count, by: 100) { // arrivée par petits morceaux, comme en BLE
+            messages += try parser.append(stream.subdata(in: start ..< min(start + 100, stream.count)))
+        }
+        XCTAssertEqual(messages.count, 3)
+        XCTAssertEqual(messages[0]["type"] as? String, "ping")
+        XCTAssertEqual(messages[1]["chunk"] as? NavetteCrypto.Chunk, chunk)
+        XCTAssertEqual(messages[2]["type"] as? String, "pong")
+    }
+
+    func testCoverageMergesOverlaps() {
+        var coverage = Coverage()
+        XCTAssertEqual(coverage.add(0, 512), 512)
+        XCTAssertEqual(coverage.add(32, 64), 0) // déjà couvert
+        XCTAssertEqual(coverage.add(1000, 1032), 32)
+        XCTAssertEqual(coverage.add(500, 1010), 488) // comble le trou [512, 1000)
+        XCTAssertEqual(coverage.total, 1032)
+        XCTAssertEqual(coverage.missing(size: 1100), [[1032, 1100]])
+    }
+
+    /// Chemin qui change en route : un renvoi en petits morceaux croise un gros morceau arrivé en retard.
+    /// Le fichier n'est terminé que quand tous les octets sont là.
+    func testMixedChunkSizesNeverCompleteEarly() {
+        let assembler = FileAssembler(directory: dir)
+        let fid = "0123456789abcdef"
+        let bytes = (0..<8).map { UInt8($0) }
+        _ = assembler.accept(chunk(fid, Array(bytes[0..<4]), off: 0, size: 8)) // gros morceau [0, 4)
+        _ = assembler.accept(chunk(fid, Array(bytes[2..<4]), off: 2, size: 8)) // petit renvoi, déjà couvert
+        XCTAssertEqual(assembler.accept(chunk(fid, Array(bytes[4..<6]), off: 4, size: 8)),
+                       .progress(fid: fid, name: "doc.bin", received: 6, size: 8))
+        guard case .completed(_, _, let url) = assembler.accept(chunk(fid, Array(bytes[4..<8]), off: 4, size: 8)) else {
+            return XCTFail("fichier non terminé")
+        }
+        XCTAssertEqual(try Data(contentsOf: url), Data(bytes))
+    }
+
     func testSafeName() {
         XCTAssertEqual(FileChunks.safeName("../../etc/passwd"), "passwd")
         XCTAssertEqual(FileChunks.safeName(".bashrc"), "bashrc")
@@ -122,10 +197,11 @@ final class FileTransferTests: XCTestCase {
         }
         let finished = expectation(description: "envoi confirmé")
         sender = try XCTUnwrap(FileSender(
-            url: source, chunkSize: 4096,
+            url: source, chunkSize: { 4096 },
             seal: { try? NavetteCrypto.seal(json: $0, key: keys.encKey, as: .phone) },
-            transmit: { clip, done in
-                let json = try! NavetteCrypto.openJSON(clip, key: keys.encKey, from: .phone)
+            sealChunk: { try? NavetteCrypto.sealChunk(meta: $0, bytes: $1, key: keys.encKey, as: .phone) },
+            transmit: { outgoing, done in
+                let json = Self.decode(outgoing, keys)
                 // Les deux premiers morceaux « partent » mais n'arrivent jamais.
                 if json["kind"] as? String == "file", dropped < 2 {
                     dropped += 1
@@ -144,13 +220,58 @@ final class FileTransferTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: XCTUnwrap(result)), Data(bytes))
     }
 
+    /// Plus de chemin un moment (relais perdu, Bluetooth pas encore connecté), puis un autre, avec
+    /// des morceaux plus petits : l'envoi reprend et aboutit.
+    func testRouteChangesDuringSend() throws {
+        let keys = try NavetteCrypto.deriveKeys(secret: NavetteCrypto.newSecret())
+        let source = dir.appendingPathComponent("source.dat")
+        let bytes = (0..<20_000).map { UInt8($0 % 247) }
+        try Data(bytes).write(to: source)
+        let assembler = FileAssembler(directory: dir.appendingPathComponent("reception"))
+        var sender: FileSender!
+        var result: URL?
+        var calls = 0
+        var sizes: [Int] = []
+        assembler.reply = { reply in DispatchQueue.main.async { sender.handle(reply) } }
+        let finished = expectation(description: "envoi confirmé")
+        sender = try XCTUnwrap(FileSender(
+            url: source,
+            chunkSize: {
+                calls += 1
+                switch calls {
+                case 1: return 8192
+                case 2, 3: return nil // aucun chemin
+                default: return 1024
+                }
+            },
+            seal: { try? NavetteCrypto.seal(json: $0, key: keys.encKey, as: .phone) },
+            sealChunk: { try? NavetteCrypto.sealChunk(meta: $0, bytes: $1, key: keys.encKey, as: .phone) },
+            transmit: { outgoing, done in
+                let json = Self.decode(outgoing, keys)
+                if let data = json["data"] as? Data { sizes.append(data.count) }
+                if case .completed(_, _, let url) = assembler.accept(json) { result = url }
+                done(true)
+            }))
+        sender.retryDelay = 0.01
+        sender.onFinish = { error in
+            XCTAssertNil(error)
+            finished.fulfill()
+        }
+        sender.start()
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(sizes.first, 8192)
+        XCTAssertEqual(sizes.dropFirst().max(), 1024)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(result)), Data(bytes))
+    }
+
     func testGivesUpWithoutAcknowledgment() throws {
         let source = dir.appendingPathComponent("source.dat")
         try Data(count: 100).write(to: source)
         let finished = expectation(description: "échec signalé")
         let sender = try XCTUnwrap(FileSender(
-            url: source, chunkSize: 4096,
+            url: source, chunkSize: { 4096 },
             seal: { _ in NavetteCrypto.Clip(id: "x", iv: "", data: "") },
+            sealChunk: { _, _ in NavetteCrypto.Chunk(id: "x", iv: Data(), box: Data()) },
             transmit: { _, done in done(true) }))
         sender.ackTimeout = 0.05
         sender.onFinish = { error in
@@ -174,10 +295,11 @@ final class FileTransferTests: XCTestCase {
         assembler.reply = { reply in DispatchQueue.main.async { sender.handle(reply) } }
         let finished = expectation(description: "envoi terminé")
         sender = try XCTUnwrap(FileSender(
-            url: source, name: "photo.jpg", mime: "image/jpeg", chunkSize: 4096,
+            url: source, name: "photo.jpg", mime: "image/jpeg", chunkSize: { 4096 },
             seal: { try? NavetteCrypto.seal(json: $0, key: keys.encKey, as: .phone) },
-            transmit: { clip, done in
-                let json = try! NavetteCrypto.openJSON(clip, key: keys.encKey, from: .phone)
+            sealChunk: { try? NavetteCrypto.sealChunk(meta: $0, bytes: $1, key: keys.encKey, as: .phone) },
+            transmit: { outgoing, done in
+                let json = Self.decode(outgoing, keys)
                 if json["kind"] as? String == "file" {
                     chunks += 1
                     XCTAssertEqual(json["mime"] as? String, "image/jpeg")
@@ -200,8 +322,9 @@ final class FileTransferTests: XCTestCase {
         try Data(count: 10_000).write(to: source)
         let finished = expectation(description: "échec signalé")
         let sender = try XCTUnwrap(FileSender(
-            url: source, chunkSize: 4096,
+            url: source, chunkSize: { 4096 },
             seal: { _ in NavetteCrypto.Clip(id: "x", iv: "", data: "") },
+            sealChunk: { _, _ in NavetteCrypto.Chunk(id: "x", iv: Data(), box: Data()) },
             transmit: { _, done in done(false) }))
         sender.retryDelay = 0.01
         sender.onFinish = { error in

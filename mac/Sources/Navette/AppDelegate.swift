@@ -68,12 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if self.local.isConnected { self.bridge.sync() }
         }
         local.onClip = { [weak self] clip in self?.received(clip, from: "local") }
+        local.onChunk = { [weak self] chunk in self?.received(chunk) }
         ble.log = { Journal.write($0) }
         ble.onState = { [weak self] _ in
             self?.updateIcon()
             if self?.ble.isConnected == true { self?.bridge.sync() }
         }
         ble.onClip = { [weak self] clip in self?.received(clip, from: "bluetooth") }
+        ble.onChunk = { [weak self] chunk in self?.received(chunk) }
         bridge.send = { [weak self] json in self?.sendEvent(json) }
         bridge.showNotifications = config.showsNotifications
         bridge.start()
@@ -167,6 +169,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func received(_ clip: NavetteCrypto.Clip, from: String) {
         guard let data = try? NavetteCrypto.openData(clip, key: keys.encKey),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // Par le relais, un morceau de fichier binaire arrive en base64 dans un Clip.
+            if let chunk = NavetteCrypto.Chunk(clip: clip), received(chunk) { return }
             lastEvent = "↓ élément illisible (secret différent ?)"
             return
         }
@@ -196,6 +200,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         history.add(content, direction: .received)
         lastEvent = "↓ \(content.preview)"
         flash("arrow.down.circle.fill")
+    }
+
+    /// Morceau de fichier binaire (liaison directe, ou relais). false s'il ne se déchiffre pas.
+    @discardableResult
+    private func received(_ chunk: NavetteCrypto.Chunk) -> Bool {
+        guard let (meta, bytes) = try? NavetteCrypto.openChunk(chunk, key: keys.encKey) else {
+            lastEvent = "↓ élément illisible (secret différent ?)"
+            return false
+        }
+        guard replayGuard.accept(id: chunk.id, t: (meta["t"] as? NSNumber)?.doubleValue),
+              meta["kind"] as? String == "file" else { return true }
+        var json = meta
+        json["data"] = bytes
+        if let event = assembler.accept(json) { fileEvent(event) }
+        return true
     }
 
     // MARK: Fichiers
@@ -280,11 +299,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let key = keys.encKey
         let mime = UTType(filenameExtension: (displayName as NSString).pathExtension)?.preferredMIMEType
         guard let sender = FileSender(
-            url: url, name: displayName, mime: mime, chunkSize: route.chunk,
+            url: url, name: displayName, mime: mime,
+            // Chemin réévalué à chaque morceau : relais perdu en route → Bluetooth, Wi-Fi retrouvé…
+            chunkSize: { [weak self] in self?.fileRoute(size: size)?.chunk },
             seal: { try? NavetteCrypto.seal(json: $0, key: key) },
-            transmit: { [weak self] clip, done in
-                guard let self else { return done(false) }
-                self.transmitChunk(clip, fileSize: size, bluetooth: route.bluetooth, completion: done)
+            sealChunk: { try? NavetteCrypto.sealChunk(meta: $0, bytes: $1, key: key) },
+            transmit: { [weak self] outgoing, done in
+                guard let self, let route = self.fileRoute(size: size) else { return done(false) }
+                self.transmitChunk(outgoing, fileSize: size, bluetooth: route.bluetooth, completion: done)
             }
         ) else {
             cleanup()
@@ -320,16 +342,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         sender.start()
     }
 
-    /// Même principe que `transmit`, mais un gros fichier ne se rabat jamais sur le relais.
-    private func transmitChunk(_ clip: NavetteCrypto.Clip, fileSize: Int64, bluetooth: Bool,
+    /// Même principe que `transmit`, mais un gros fichier ne se rabat jamais sur le relais. Un morceau
+    /// part en trame binaire sur une liaison directe, en base64 (une seule fois) par le relais.
+    private func transmitChunk(_ outgoing: FileOutgoing, fileSize: Int64, bluetooth: Bool,
                                completion: @escaping (Bool) -> Void) {
+        let clip: () -> NavetteCrypto.Clip = { // base64 seulement si nécessaire
+            switch outgoing {
+            case .message(let message): return message
+            case .chunk(let chunk): return chunk.clip
+            }
+        }
         let viaRelay = { [weak self] in
             guard let self, fileSize <= FileChunks.maxRelayBytes else { return completion(false) }
-            self.relay.send(clip, ephemeral: true, completion: completion)
+            self.relay.send(clip(), ephemeral: true, completion: completion)
         }
         let fallback: (Bool) -> Void = { ok in if ok { completion(true) } else { viaRelay() } }
-        if local.send(clip, ephemeral: true, completion: fallback) { return }
-        if bluetooth, ble.send(clip, ephemeral: true, completion: fallback) { return }
+        if case .chunk(let chunk) = outgoing {
+            if local.send(chunk, completion: fallback) { return }
+            if bluetooth, ble.send(chunk, completion: fallback) { return }
+        }
+        if local.send(clip(), ephemeral: true, completion: fallback) { return }
+        if bluetooth, ble.send(clip(), ephemeral: true, completion: fallback) { return }
         viaRelay()
     }
 

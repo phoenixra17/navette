@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveKeys, seal, open, ReplayGuard, MAX_AGE_MS, localProof } from './protocol.js';
+import { deriveKeys, seal, open, ReplayGuard, MAX_AGE_MS, localProof, sealBinary, openBinary } from './protocol.js';
 
 // Mêmes vecteurs que mac/Tests/NavetteTests/CryptoTests.swift et NavetteCryptoTest.kt.
 const SECRET = 'q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ';
@@ -44,4 +44,21 @@ test('liaison locale : identifiant et preuves de référence', () => {
   assert.equal(localProof(keys.localKey, 'phone', macNonce, phoneNonce), 'BC1+z0iTeOIAbQ28jAHhtnR00orTsTHKlQlVMIWM/P0=');
   assert.equal(localProof(keys.localKey, 'mac', macNonce, phoneNonce), 'EusgLaWSRbBDltrLYEArMN58ELg5q44KIAVxJd5nubE=');
   assert.notEqual(localProof(keys.localKey, 'mac', phoneNonce, macNonce), localProof(keys.localKey, 'mac', macNonce, phoneNonce));
+});
+
+test('morceaux binaires : vecteur de référence, rôles et données associées séparés', () => {
+  const box = Buffer.from('kPxGVlEPxme7U89aWoEcmUdfL9BccFQahZXH+HfoapHETk8wLVAPesK5TCgqXULFMxJkk/Oxn7IRB5N+ogyXCpFOKClRbexALD6GvtSAuyGWsKoUyN+uFllGlPxBia1Sr3Cl+J61sVxh+xcvfWNkQPtoblc=', 'base64');
+  const chunk = { id: 'vecteur-binaire', iv: Buffer.from('000102030405060708090a0b', 'hex'), box };
+  const { meta, bytes } = openBinary(keys.encKey, chunk, 'phone');
+  assert.equal(meta.name, 'é.bin');
+  assert.equal(meta.t, 1790000000000);
+  assert.deepEqual([...bytes], [0, 1, 2, 250, 251, 255]);
+  assert.throws(() => openBinary(keys.encKey, chunk, 'mac'), 'renvoyé à son expéditeur');
+  // Un bloc binaire ne se déchiffre pas comme un élément JSON, ni l'inverse.
+  const asClip = { id: chunk.id, iv: chunk.iv.toString('base64'), data: box.toString('base64') };
+  assert.throws(() => open(keys.encKey, asClip, 'phone'));
+  const clip = seal(keys.encKey, { kind: 'text', text: 'x' }, 'id-json', 'phone');
+  assert.throws(() => openBinary(keys.encKey, { id: clip.id, iv: Buffer.from(clip.iv, 'base64'), box: Buffer.from(clip.data, 'base64') }, 'phone'));
+  const empty = sealBinary(keys.encKey, { kind: 'file' }, Buffer.alloc(0), 'vide', 'mac');
+  assert.equal(openBinary(keys.encKey, empty, 'mac').bytes.length, 0);
 });

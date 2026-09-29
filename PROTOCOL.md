@@ -70,22 +70,25 @@ so one app can be updated before the other.
 
 ## Files
 
-Any file (a folder is zipped by the Mac first) travels as a series of `file` messages, each one a
-chunk encrypted on its own like any other message, so neither side ever holds the whole file in
-memory and the relay sees nothing but ciphertext.
+Any file (a folder is zipped by the Mac first) travels as a series of `file` chunks, each one
+encrypted on its own in the [binary format](#binary-chunks), so neither side ever holds the whole
+file in memory and the relay sees nothing but ciphertext. Control messages are ordinary JSON messages.
 
 | `kind` | From | Fields |
 |---|---|---|
-| `file` | sender | `fid` (transfer id), `name`, `size`, `mime` (optional), `off` (byte offset), `data` (base64 chunk) |
+| `file` | sender | binary chunk: metadata `fid` (transfer id), `name`, `size`, `mime` (optional), `off` (byte offset), then the raw bytes |
 | `file-end` | sender | `fid`, `name`, `size`, `n` (attempt number) — everything was sent |
 | `file-ack` | receiver | `fid`, `missing` (list of `[start, end)` byte ranges not received; empty = complete), `n` (echoed) |
 | `file-cancel` | either | `fid` — the sender cancelled, or the receiver gave up (bad chunk, disk, 120 s without news) |
 
-- **Pacing.** A chunk is sent once the previous one has left (TCP, Bluetooth or WebSocket write
-  done); on Android, the sender also waits while OkHttp's WebSocket queue holds more than 4 MB.
+- **Pacing.** The Mac keeps at most 4 chunks in flight (read, sealed or being written): with a single
+  one, the pipe empties between chunks and a hotspot link drops from 40 MB/s to 2.5 MB/s. Android
+  writes each chunk into its socket, whose kernel buffer does the same job, and also waits while
+  OkHttp's WebSocket queue holds more than 4 MB. Memory stays bounded either way.
 - **Chunks** are 512 KB over Wi-Fi and the relay, 32 KB over Bluetooth (so a frame passes well within
   the 40 s link timeout, even over GATT). Each carries its offset: the order of arrival does not
-  matter and duplicates are ignored.
+  matter. The receiver merges the byte ranges it has, so overlapping chunks of different sizes
+  (the route, hence the chunk size, can change mid-transfer) are counted once.
 - **Acknowledgment.** A link can die silently: writes into a dead TCP connection succeed until the
   Mac notices, up to 40 s later. So after the last chunk the sender sends `file-end` over the same
   path, and the receiver answers `file-ack` with the ranges it lacks; the sender resends them (the
@@ -94,11 +97,33 @@ memory and the relay sees nothing but ciphertext.
   their way) and ignored, unless it says complete. The receiver also sends an empty `file-ack` as
   soon as it has every byte. Only then does the sender report success.
 - **Routes.** Wi-Fi for any size (4 GB at most); without it, the relay up to 25 MB (its rate
-  limit), then Bluetooth up to 2 MB (about 50 KB/s). A file too large for the available links is
-  refused before sending, and a chunk of a large file never falls back to the relay.
+  limit), then Bluetooth up to 2 MB (about 50 KB/s). The route is chosen again for every chunk and
+  every `file-end`: a relay lost mid-transfer (mobile data off) gives way to Bluetooth, a Wi-Fi link
+  that comes back takes over. With no route at all, the sender waits up to 40 s. A file too large
+  for the available links is refused before sending, and a chunk of a large file never falls back
+  to the relay.
 - **Received files** are assembled in a cache folder, then moved to `~/Downloads` on the Mac (`name
   2.ext` if taken) or copied to `Download/Navette` on Android (MediaStore). The name is sanitised on
   both sides: no path, no leading dot, no control character.
+
+## Binary chunks
+
+File chunks skip base64, which would otherwise add 78 % (base64 of a JSON payload holding base64).
+
+- **Plaintext:** 4-byte big-endian length, the metadata as UTF-8 JSON (with `t`, like any payload),
+  then the raw bytes. Encrypted with AES-256-GCM like other messages, but with associated data
+  `navette/v2b|<sender>|<id>`, so a chunk never decrypts as a JSON message nor the other way round.
+- **Direct links** (Wi-Fi, Bluetooth) carry it in a binary frame: the high bit of the 4-byte frame
+  length is set, and the body is a 2-byte big-endian header length, a JSON header `{id, iv}` (iv in
+  base64), then ciphertext ‖ tag. Each side announces that it reads binary frames with `bin: 1` in
+  its `hello`; without it, chunks go as JSON clips.
+- **Relay:** a regular clip `{id, iv, data}` whose `data` is the base64 of ciphertext ‖ tag (base64
+  once). The relay needs no change; a receiver whose JSON decryption fails tries the binary format.
+
+Measured between a MacBook and a Galaxy S24: 1.00 byte on the wire per byte of file over the direct
+link (1.8 with base64); 200 MB in about 5 s Mac → phone and 3 s phone → Mac over the phone's 5 GHz
+hotspot; 1 MB in 18–20 s over Bluetooth (34–41 s before). `server/tests/protocol.js` (`sealBinary`, `openBinary`) holds the
+reference vector for both test suites.
 
 ## Local link
 
@@ -111,8 +136,8 @@ When both devices share a network, they talk directly and the relay is not neede
   such as Tailscale; never mobile data), so the Mac can reach it where mDNS does not pass.
 - **The Mac connects**, trying in order: `NAVETTE_LOCAL=host:port` (debugging), Bonjour results,
   announced addresses. It retries with backoff (2 s → 60 s) and at once on wake or network change.
-- **Framing:** 4-byte big-endian length, then UTF-8 JSON. At most 4 KB per frame before
-  authentication, 24 MB after.
+- **Framing:** 4-byte big-endian length, then UTF-8 JSON (or a [binary chunk](#binary-chunks) when the
+  length's high bit is set). At most 4 KB per frame before authentication, 24 MB after.
 - **Handshake**, with `localKey` = HMAC(secret, `navette/local/v1`) and
   `proof(role) = base64(HMAC-SHA256(localKey, "navette/local/v1|<role>|<macNonce>|<phoneNonce>"))`:
 

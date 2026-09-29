@@ -54,6 +54,58 @@ public enum FileChunks {
     }
 }
 
+/// Plages d'octets reçues, fusionnées : des morceaux de tailles différentes (le chemin, donc la taille
+/// des morceaux, peut changer en cours d'envoi) qui se chevauchent ne sont comptés qu'une fois.
+struct Coverage {
+    /// Triées, disjointes, [début, fin).
+    private(set) var ranges: [(start: Int64, end: Int64)] = []
+    private(set) var total: Int64 = 0
+
+    /// Ajoute [start, end) ; renvoie le nombre d'octets nouveaux.
+    @discardableResult
+    mutating func add(_ start: Int64, _ end: Int64) -> Int64 {
+        guard end > start else { return 0 }
+        var merged: [(start: Int64, end: Int64)] = []
+        var lower = start, upper = end, overlap: Int64 = 0
+        var placed = false
+        for range in ranges {
+            if range.end < lower {
+                merged.append(range)
+            } else if range.start > upper {
+                if !placed { merged.append((lower, upper)); placed = true }
+                merged.append(range)
+            } else { // chevauche ou touche
+                overlap += max(0, min(range.end, end) - max(range.start, start))
+                lower = min(lower, range.start)
+                upper = max(upper, range.end)
+            }
+        }
+        if !placed { merged.append((lower, upper)) }
+        ranges = merged
+        let added = (end - start) - overlap
+        total += added
+        return added
+    }
+
+    /// Plages [début, fin) manquantes dans [0, size).
+    func missing(size: Int64) -> [[Int64]] {
+        var gaps: [[Int64]] = []
+        var cursor: Int64 = 0
+        for range in ranges {
+            if range.start > cursor { gaps.append([cursor, range.start]) }
+            cursor = max(cursor, range.end)
+        }
+        if cursor < size { gaps.append([cursor, size]) }
+        return gaps
+    }
+}
+
+/// Ce que `FileSender` fait partir : un message JSON (`file-end`, `file-cancel`) ou un morceau binaire.
+public enum FileOutgoing {
+    case message(NavetteCrypto.Clip)
+    case chunk(NavetteCrypto.Chunk)
+}
+
 /// Réassemble les fichiers reçus dans un dossier temporaire. Tout sur la file principale.
 public final class FileAssembler {
     public enum Event: Equatable {
@@ -71,9 +123,10 @@ public final class FileAssembler {
         let size: Int64
         let url: URL
         let handle: FileHandle
-        /// Décalage → longueur des morceaux reçus.
-        var chunks: [Int64: Int] = [:]
-        var received: Int64 = 0
+        var coverage = Coverage()
+        /// Pour un fichier vide : son unique morceau (vide) est arrivé.
+        var sawEmpty = false
+        var received: Int64 { coverage.total }
         var lastChunk = Date()
 
         init(name: String, size: Int64, url: URL, handle: FileHandle) {
@@ -85,14 +138,8 @@ public final class FileAssembler {
 
         /// Plages [début, fin) pas encore reçues.
         var missing: [[Int64]] {
-            var ranges: [[Int64]] = []
-            var cursor: Int64 = 0
-            for (offset, length) in chunks.sorted(by: { $0.key < $1.key }) {
-                if offset > cursor { ranges.append([cursor, offset]) }
-                cursor = max(cursor, offset + Int64(length))
-            }
-            if cursor < size || chunks.isEmpty { ranges.append([cursor, size]) }
-            return Array(ranges.prefix(FileChunks.maxMissingRanges))
+            if size == 0 { return sawEmpty ? [] : [[0, 0]] }
+            return Array(coverage.missing(size: size).prefix(FileChunks.maxMissingRanges))
         }
     }
 
@@ -110,7 +157,8 @@ public final class FileAssembler {
 
     public var isReceiving: Bool { !incoming.isEmpty }
 
-    /// Message `file`, `file-end` ou `file-cancel` déjà déchiffré. nil si rien à signaler.
+    /// Message `file`, `file-end` ou `file-cancel` déjà déchiffré (`data` : octets bruts d'un morceau
+    /// binaire, ou base64). nil si rien à signaler.
     public func accept(_ json: [String: Any]) -> Event? {
         guard let fid = json["fid"] as? String, FileChunks.validFid(fid) else { return nil }
         switch json["kind"] as? String {
@@ -140,7 +188,7 @@ public final class FileAssembler {
         guard closed[fid] == nil else { return nil }
         guard let size = (json["size"] as? NSNumber)?.int64Value, (0...FileChunks.maxBytes).contains(size),
               let offset = (json["off"] as? NSNumber)?.int64Value, offset >= 0,
-              let base64 = json["data"] as? String, let data = Data(base64Encoded: base64),
+              let data = (json["data"] as? Data) ?? (json["data"] as? String).flatMap({ Data(base64Encoded: $0) }),
               offset + Int64(data.count) <= size
         else { return fail(fid, "morceau invalide") }
         let name = FileChunks.safeName(json["name"] as? String ?? "")
@@ -162,15 +210,16 @@ public final class FileAssembler {
             incoming[fid] = transfer
         }
         transfer.lastChunk = Date()
-        guard transfer.chunks[offset] == nil else { return nil } // doublon (renvoi d'un morceau arrivé en retard)
         do {
             try transfer.handle.seek(toOffset: UInt64(offset))
-            try transfer.handle.write(contentsOf: data)
+            try transfer.handle.write(contentsOf: data) // un chevauchement réécrit les mêmes octets
         } catch {
             return fail(fid, "disque plein ?")
         }
-        transfer.chunks[offset] = data.count
-        transfer.received += Int64(data.count)
+        let added = transfer.coverage.add(offset, offset + Int64(data.count))
+        if size == 0 { transfer.sawEmpty = true }
+        // Doublon (renvoi d'un morceau arrivé en retard) : rien de nouveau à signaler.
+        guard added > 0 || size == 0 else { return nil }
         guard transfer.received >= size else {
             return .progress(fid: fid, name: transfer.name, received: transfer.received, size: size)
         }
@@ -232,12 +281,17 @@ public final class FileSender {
     static let maxEndAttempts = 4
     static let maxRounds = 10
     static let maxRetries = 20
+    /// Morceaux en vol au plus (préparés ou en cours d'envoi).
+    public var window = 4
+    private var inFlight = 0
 
     private let url: URL
     private let mime: String?
-    private let chunkSize: Int
+    /// Taille des morceaux selon le chemin du moment ; nil = aucun chemin (on réessaie un moment).
+    private let chunkSize: () -> Int?
     private let seal: ([String: Any]) -> NavetteCrypto.Clip?
-    private let transmit: (NavetteCrypto.Clip, @escaping (Bool) -> Void) -> Void
+    private let sealChunk: ([String: Any], Data) -> NavetteCrypto.Chunk?
+    private let transmit: (FileOutgoing, @escaping (Bool) -> Void) -> Void
     private let work = DispatchQueue(label: "navette.fichier")
     private var handle: FileHandle?
     /// Plages [début, fin) restant à envoyer.
@@ -249,10 +303,12 @@ public final class FileSender {
     private var cancelled = false
     private var done = false
 
-    /// `seal` chiffre un message ; `transmit` l'envoie et rappelle avec le résultat.
-    public init?(url: URL, name: String? = nil, mime: String? = nil, chunkSize: Int,
+    /// `seal` chiffre un message, `sealChunk` un morceau (métadonnées + octets) ; `transmit` l'envoie
+    /// et rappelle avec le résultat.
+    public init?(url: URL, name: String? = nil, mime: String? = nil, chunkSize: @escaping () -> Int?,
                  seal: @escaping ([String: Any]) -> NavetteCrypto.Clip?,
-                 transmit: @escaping (NavetteCrypto.Clip, @escaping (Bool) -> Void) -> Void) {
+                 sealChunk: @escaping ([String: Any], Data) -> NavetteCrypto.Chunk?,
+                 transmit: @escaping (FileOutgoing, @escaping (Bool) -> Void) -> Void) {
         guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
               Int64(size) <= FileChunks.maxBytes,
               let handle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -262,6 +318,7 @@ public final class FileSender {
         self.mime = mime
         self.chunkSize = chunkSize
         self.seal = seal
+        self.sealChunk = sealChunk
         self.transmit = transmit
         self.handle = handle
         ranges = [(0, Int64(size))]
@@ -290,7 +347,7 @@ public final class FileSender {
         guard !wanted.isEmpty else { return }
         // Réponse à un `file-end` précédent (des morceaux étaient encore en route) : on attend la suivante.
         if let n = json["n"] as? NSNumber, n.intValue != endAttempts + rounds * 100 { return }
-        guard ranges.isEmpty else { return } // renvoi déjà en cours : le prochain `file-end` fera le point
+        guard ranges.isEmpty, inFlight == 0 else { return } // renvoi déjà en cours : le prochain `file-end` fera le point
         ackTimer?.cancel()
         ackTimer = nil
         rounds += 1
@@ -300,11 +357,25 @@ public final class FileSender {
         next()
     }
 
+    /// Réserve le morceau suivant et le prépare, tant que la fenêtre n'est pas pleine : quelques
+    /// morceaux en vol gardent le tuyau plein (sinon il se vide entre deux morceaux, et le débit tombe
+    /// à un morceau par aller-retour).
     private func next() {
         guard !done, !cancelled, let handle else { return }
-        guard let range = ranges.first else { return sendEnd() }
+        guard var range = ranges.first else {
+            if inFlight == 0 { sendEnd() }
+            return
+        }
+        guard inFlight < window else { return }
+        guard let piece = chunkSize() else {
+            if inFlight == 0 { linkDown { self.next() } } // sinon, le prochain morceau fini relancera
+            return
+        }
         let offset = range.start
-        let count = Int(min(Int64(chunkSize), range.end - range.start))
+        let count = Int(min(Int64(piece), range.end - range.start))
+        range.start += Int64(count)
+        if range.start >= range.end { ranges.removeFirst() } else { ranges[0] = range }
+        inFlight += 1
         work.async { [self] in
             let data: Data
             do {
@@ -316,33 +387,35 @@ public final class FileSender {
             if data.count < count {
                 return DispatchQueue.main.async { self.finish("fichier modifié pendant l’envoi") }
             }
-            var message: [String: Any] = ["kind": "file", "fid": fid, "name": name, "size": size,
-                                          "off": offset, "data": data.base64EncodedString()]
-            if let mime { message["mime"] = mime }
-            let clip = seal(message)
-            DispatchQueue.main.async { self.send(clip, offset: offset, length: data.count) }
+            var meta: [String: Any] = ["kind": "file", "fid": fid, "name": name, "size": size, "off": offset]
+            if let mime { meta["mime"] = mime }
+            let chunk = sealChunk(meta, data)
+            DispatchQueue.main.async { self.send(chunk, length: data.count) }
         }
+        next()
     }
 
-    private func send(_ clip: NavetteCrypto.Clip?, offset: Int64, length: Int) {
+    private func send(_ chunk: NavetteCrypto.Chunk?, length: Int) {
         guard !done, !cancelled else { return }
-        guard let clip else { return finish("chiffrement impossible") }
-        transmit(clip) { ok in
+        guard let chunk else { return finish("chiffrement impossible") }
+        transmit(.chunk(chunk)) { ok in
             guard !self.done, !self.cancelled else { return }
-            guard ok else {
-                // Liaison qui change (Wi-Fi perdu, Bluetooth en cours de connexion) : on réessaie un moment.
-                self.retries += 1
-                guard self.retries <= Self.maxRetries else { return self.finish("liaison perdue") }
-                return DispatchQueue.main.asyncAfter(deadline: .now() + self.retryDelay) { self.send(clip, offset: offset, length: length) }
-            }
+            guard ok else { return self.linkDown { self.send(chunk, length: length) } }
             self.retries = 0
-            if var range = self.ranges.first, range.start == offset {
-                range.start += Int64(length)
-                if range.start >= range.end { self.ranges.removeFirst() } else { self.ranges[0] = range }
-            }
+            self.inFlight -= 1
             self.sent = min(self.size, self.sent + Int64(length))
             self.onProgress?()
             self.next()
+        }
+    }
+
+    /// Liaison qui change (Wi-Fi perdu, Bluetooth en cours de connexion) : on réessaie un moment.
+    private func linkDown(_ again: @escaping () -> Void) {
+        retries += 1
+        guard retries <= Self.maxRetries else { return finish("liaison perdue") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+            guard let self, !self.done, !self.cancelled else { return }
+            again()
         }
     }
 
@@ -358,7 +431,7 @@ public final class FileSender {
     }
 
     private func control(_ message: [String: Any]) {
-        if let clip = seal(message) { transmit(clip) { _ in } }
+        if let clip = seal(message) { transmit(.message(clip)) { _ in } }
     }
 
     private func finish(_ error: String?) {

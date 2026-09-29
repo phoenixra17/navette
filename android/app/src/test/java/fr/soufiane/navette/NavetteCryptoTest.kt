@@ -93,4 +93,34 @@ class NavetteCryptoTest {
         assertFalse("sans horodatage", guard.accept("c", -1L, now))
         assertTrue("décalage d’horloge d’une minute", guard.accept("d", now - 60_000, now))
     }
+
+    /** Vecteur produit par server/tests/protocol.js (sealBinary), comme côté Mac. */
+    @Test
+    fun opensReferenceChunk() {
+        val key = NavetteCrypto.deriveKeys(secret).encKey
+        val chunk = NavetteCrypto.Chunk(
+            "vecteur-binaire", ByteArray(12) { it.toByte() },
+            java.util.Base64.getDecoder().decode("kPxGVlEPxme7U89aWoEcmUdfL9BccFQahZXH+HfoapHETk8wLVAPesK5TCgqXULFMxJkk/Oxn7IRB5N+ogyXCpFOKClRbexALD6GvtSAuyGWsKoUyN+uFllGlPxBia1Sr3Cl+J61sVxh+xcvfWNkQPtoblc="),
+        )
+        val (meta, bytes) = NavetteCrypto.openChunk(key, chunk, NavetteCrypto.PHONE)
+        assertEquals("é.bin", meta.getString("name"))
+        assertEquals(1790000000000L, meta.getLong("t"))
+        assertEquals(listOf(0, 1, 2, 250, 251, 255), bytes.map { it.toInt() and 0xff })
+        assertThrows(Exception::class.java) { NavetteCrypto.openChunk(key, chunk, NavetteCrypto.MAC) }
+        // Un morceau binaire ne se lit pas comme un élément JSON.
+        assertThrows(Exception::class.java) { NavetteCrypto.open(key, chunk.toClip(), NavetteCrypto.PHONE) }
+    }
+
+    @Test
+    fun chunkRoundTripThroughRelayForm() {
+        val key = NavetteCrypto.deriveKeys(secret).encKey
+        val data = ByteArray(100_000) { (it % 253).toByte() }
+        val sealed = NavetteCrypto.sealChunk(key, org.json.JSONObject().put("kind", "file").put("off", 42), data)
+        val back = NavetteCrypto.Chunk.fromClip(sealed.toClip())!!
+        val (meta, bytes) = NavetteCrypto.openChunk(key, back, NavetteCrypto.PHONE)
+        assertEquals(42, meta.getInt("off"))
+        assertTrue(bytes.contentEquals(data))
+        val empty = NavetteCrypto.sealChunk(key, org.json.JSONObject().put("kind", "file"), ByteArray(0))
+        assertEquals(0, NavetteCrypto.openChunk(key, empty, NavetteCrypto.PHONE).second.size)
+    }
 }

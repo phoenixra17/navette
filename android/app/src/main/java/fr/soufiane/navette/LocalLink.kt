@@ -48,9 +48,13 @@ object LocalLink {
     private const val TAG = "NavetteLocal"
     private const val MAX_FRAME = 24 * 1024 * 1024
     private const val MAX_HANDSHAKE_FRAME = 4096
+    /** Bit de poids fort de la longueur : trame binaire (morceau de fichier, voir PROTOCOL.md). */
+    private const val BINARY_FLAG = 0x80000000.toInt()
 
     private class Peer(val channel: Channel, val via: Via) {
         val output = DataOutputStream(channel.output.buffered())
+        /** Le Mac lit les trames binaires (annoncé par `bin` dans son `hello`). */
+        @Volatile var binary = false
         /** Écritures hors du fil principal, dans l'ordre ; une file par liaison (le BLE est lent). */
         val writer: ExecutorService = Executors.newSingleThreadExecutor()
         fun close() {
@@ -123,6 +127,20 @@ object LocalLink {
                 done(ok)
             }
         }.onFailure { return false } // liaison fermée entre-temps
+        return true
+    }
+
+    /** Morceau de fichier en trame binaire ; false si pas de liaison, ou Mac qui ne les lit pas. */
+    fun sendChunk(chunk: NavetteCrypto.Chunk, bluetooth: Boolean, done: (Boolean) -> Unit): Boolean {
+        val target = (peers[Via.WIFI] ?: peers[Via.BLUETOOTH]?.takeIf { bluetooth })?.takeIf { it.binary } ?: return false
+        runCatching {
+            target.writer.execute {
+                val result = runCatching { writeChunk(target, chunk) }
+                result.exceptionOrNull()?.let { Log.w(TAG, "envoi impossible (${target.via.label}) : ${it.message}") }
+                if (result.isFailure) drop(target)
+                done(result.isSuccess)
+            }
+        }.onFailure { return false }
         return true
     }
 
@@ -224,8 +242,9 @@ object LocalLink {
             }
             val phoneNonce = nonce()
             val candidate = Peer(channel, via)
+            candidate.binary = hello.has("bin")
             write(candidate, JSONObject()
-                .put("type", "hello").put("v", 1).put("nonce", phoneNonce)
+                .put("type", "hello").put("v", 1).put("nonce", phoneNonce).put("bin", 1)
                 .put("proof", NavetteCrypto.localProof(keys.localKey, NavetteCrypto.PHONE, macNonce, phoneNonce)))
             val auth = read(input, MAX_HANDSHAKE_FRAME)
             val expected = NavetteCrypto.localProof(keys.localKey, NavetteCrypto.MAC, macNonce, phoneNonce)
@@ -248,6 +267,7 @@ object LocalLink {
                         Log.i(TAG, "élément reçu (${via.label}, ${message.optString("data").length / 1024} Ko)")
                         onMessage?.invoke(message)
                     }
+                    "chunk" -> onMessage?.invoke(message)
                     "ping" -> runCatching {
                         candidate.writer.execute { runCatching { write(candidate, JSONObject().put("type", "pong")) } }
                     }
@@ -272,12 +292,35 @@ object LocalLink {
 
     // --- Trames : longueur sur 4 octets (gros-boutiste) puis JSON en UTF-8 ---
 
+    /** Trame binaire : `{type: "chunk", chunk: NavetteCrypto.Chunk}`. */
     private fun read(input: DataInputStream, limit: Int): JSONObject {
-        val length = input.readInt()
+        val raw = input.readInt()
+        val length = raw and BINARY_FLAG.inv()
         if (length <= 0 || length > limit) throw IOException("trame de $length octets")
         val bytes = ByteArray(length)
         input.readFully(bytes)
-        return JSONObject(String(bytes, Charsets.UTF_8))
+        if (raw and BINARY_FLAG == 0) return JSONObject(String(bytes, Charsets.UTF_8))
+        // 2 octets de longueur, en-tête JSON {id, iv}, puis le chiffré brut.
+        val headerLength = ((bytes[0].toInt() and 0xff) shl 8) or (bytes[1].toInt() and 0xff)
+        if (2 + headerLength > length) throw IOException("en-tête binaire tronqué")
+        val header = JSONObject(String(bytes, 2, headerLength, Charsets.UTF_8))
+        val chunk = NavetteCrypto.Chunk(
+            header.getString("id"), Base64.getDecoder().decode(header.getString("iv")),
+            bytes.copyOfRange(2 + headerLength, length),
+        )
+        return JSONObject().put("type", "chunk").put("chunk", chunk)
+    }
+
+    private fun writeChunk(target: Peer, chunk: NavetteCrypto.Chunk) {
+        val header = JSONObject().put("id", chunk.id).put("iv", Base64.getEncoder().encodeToString(chunk.iv))
+            .toString().toByteArray(Charsets.UTF_8)
+        synchronized(target) {
+            target.output.writeInt((2 + header.size + chunk.box.size) or BINARY_FLAG)
+            target.output.writeShort(header.size)
+            target.output.write(header)
+            target.output.write(chunk.box)
+            target.output.flush()
+        }
     }
 
     private fun write(target: Peer, message: JSONObject) {

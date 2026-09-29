@@ -92,6 +92,50 @@ object NavetteCrypto {
         return JSONObject(String(cipher.doFinal(b64.decode(clip.data)), Charsets.UTF_8))
     }
 
+    // --- Morceaux de fichier binaires (voir « Binary chunks » dans PROTOCOL.md) ---
+    // En clair : 4 octets de longueur, les métadonnées en JSON, puis les octets bruts (sans base64).
+
+    private fun aadBinary(from: String, id: String) = "navette/v2b|$from|$id".toByteArray(Charsets.UTF_8)
+
+    /** [box] : chiffré ‖ tag. Tel quel sur une liaison directe, en base64 dans un [Clip] par le relais. */
+    class Chunk(val id: String, val iv: ByteArray, val box: ByteArray) {
+        fun toClip(): Clip {
+            val b64 = Base64.getEncoder()
+            return Clip(id, b64.encodeToString(iv), b64.encodeToString(box))
+        }
+
+        companion object {
+            /** Un [Clip] du relais qui ne se lit pas en JSON est peut-être un morceau binaire. */
+            fun fromClip(clip: Clip): Chunk? = runCatching {
+                val b64 = Base64.getDecoder()
+                Chunk(clip.id, b64.decode(clip.iv), b64.decode(clip.data))
+            }.getOrNull()
+        }
+    }
+
+    fun sealChunk(key: ByteArray, meta: JSONObject, bytes: ByteArray, id: String = UUID.randomUUID().toString(), from: String = PHONE): Chunk {
+        meta.put("t", System.currentTimeMillis())
+        val json = meta.toString().toByteArray(Charsets.UTF_8)
+        val plaintext = java.nio.ByteBuffer.allocate(4 + json.size + bytes.size).putInt(json.size).put(json).put(bytes).array()
+        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        cipher.updateAAD(aadBinary(from, id))
+        return Chunk(id, iv, cipher.doFinal(plaintext))
+    }
+
+    /** Métadonnées et octets ; lève une exception si le morceau a été altéré ou vient d'ailleurs. */
+    fun openChunk(key: ByteArray, chunk: Chunk, from: String = MAC): Pair<JSONObject, ByteArray> {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, chunk.iv))
+        cipher.updateAAD(aadBinary(from, chunk.id))
+        val plaintext = cipher.doFinal(chunk.box)
+        val length = java.nio.ByteBuffer.wrap(plaintext, 0, 4).int
+        require(length >= 0 && 4 + length <= plaintext.size) { "métadonnées tronquées" }
+        val meta = JSONObject(String(plaintext, 4, length, Charsets.UTF_8))
+        return meta to plaintext.copyOfRange(4 + length, plaintext.size)
+    }
+
     fun sealText(key: ByteArray, text: String, id: String = UUID.randomUUID().toString(), from: String = PHONE): Clip =
         seal(key, JSONObject().put("kind", "text").put("text", text), id, from)
 

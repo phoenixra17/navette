@@ -22,6 +22,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
 
     public var onState: ((State) -> Void)?
     public var onClip: ((NavetteCrypto.Clip) -> Void)?
+    public var onChunk: ((NavetteCrypto.Chunk) -> Void)?
     public var log: ((String) -> Void)?
     public private(set) var state: State = .idle("pas encore démarrée") {
         didSet {
@@ -66,6 +67,8 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     private var pingTimer: Timer?
     private var retryTimer: Timer?
     private var lastHeard = Date()
+    /// Le téléphone lit les trames binaires (annoncé par `bin` dans son `hello`).
+    private var peerBinary = false
 
     public override init() { super.init() }
 
@@ -85,6 +88,14 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         var message: [String: Any] = ["type": "clip", "id": clip.id, "iv": clip.iv, "data": clip.data]
         if ephemeral { message["ephemeral"] = true }
         enqueue(message, completion: completion)
+        return true
+    }
+
+    /// Morceau de fichier en trame binaire. false si pas de liaison, ou téléphone qui ne les lit pas.
+    public func send(_ chunk: NavetteCrypto.Chunk, completion: @escaping (Bool) -> Void) -> Bool {
+        guard isConnected, peerBinary, let frame = LinkWire.encode(chunk) else { return false }
+        outbox.append((frame, completion, Date()))
+        pump()
         return true
     }
 
@@ -247,7 +258,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     private func sayHello() {
         let macNonce = LinkWire.nonce()
         stage = .awaitingHello(macNonce: macNonce)
-        enqueue(["type": "hello", "v": 1, "nonce": macNonce], completion: nil)
+        enqueue(["type": "hello", "v": 1, "nonce": macNonce, "bin": 1], completion: nil)
     }
 
     // MARK: Réception
@@ -313,6 +324,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
                 return retrySoon()
             }
             stage = .awaitingReady
+            peerBinary = message["bin"] != nil
             enqueue(["type": "auth", "proof": NavetteCrypto.localProof(key: keys.localKey, role: .mac,
                                                                        macNonce: macNonce, phoneNonce: phoneNonce)],
                     completion: nil)
@@ -320,6 +332,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
             guard type == "ready" else { return retrySoon() }
             established()
         case .ready:
+            if let chunk = message["chunk"] as? NavetteCrypto.Chunk { onChunk?(chunk) }
             if type == "clip", let id = message["id"] as? String, let iv = message["iv"] as? String,
                let data = message["data"] as? String {
                 onClip?(NavetteCrypto.Clip(id: id, iv: iv, data: data))

@@ -20,6 +20,7 @@ public final class LocalLink {
 
     public var onState: ((State) -> Void)?
     public var onClip: ((NavetteCrypto.Clip) -> Void)?
+    public var onChunk: ((NavetteCrypto.Chunk) -> Void)?
     /// Diagnostic (le journal de l'app).
     public var log: ((String) -> Void)?
     public private(set) var state: State = .searching {
@@ -53,6 +54,8 @@ public final class LocalLink {
     private var handshakeTimer: Timer?
     private var pingTimer: Timer?
     private var lastHeard = Date()
+    /// Le téléphone lit les trames binaires (annoncé par `bin` dans son `hello`).
+    private var peerBinary = false
 
     public init() {
         manual = ProcessInfo.processInfo.environment["NAVETTE_LOCAL"].flatMap(Self.endpoint(from:))
@@ -94,6 +97,15 @@ public final class LocalLink {
         var message: [String: Any] = ["type": "clip", "id": clip.id, "iv": clip.iv, "data": clip.data]
         if ephemeral { message["ephemeral"] = true }
         write(message, on: connection) { ok in completion?(ok) }
+        return true
+    }
+
+    /// Morceau de fichier en trame binaire. false si pas de liaison, ou téléphone qui ne les lit pas.
+    public func send(_ chunk: NavetteCrypto.Chunk, completion: @escaping (Bool) -> Void) -> Bool {
+        guard isConnected, peerBinary, let connection, let frame = LinkWire.encode(chunk) else { return false }
+        connection.send(content: frame, completion: .contentProcessed { error in
+            DispatchQueue.main.async { completion(error == nil) }
+        })
         return true
     }
 
@@ -199,7 +211,7 @@ public final class LocalLink {
     private func sayHello(on connection: NWConnection, attempt current: Int) {
         guard let keys else { return }
         let macNonce = LinkWire.nonce()
-        write(["type": "hello", "v": 1, "nonce": macNonce], on: connection)
+        write(["type": "hello", "v": 1, "nonce": macNonce, "bin": 1], on: connection)
         readFrame(on: connection, limit: Self.maxHandshakeFrame, attempt: current) { [weak self] hello in
             guard let self, hello["type"] as? String == "hello",
                   let phoneNonce = hello["nonce"] as? String, phoneNonce.count >= 16,
@@ -210,6 +222,7 @@ public final class LocalLink {
                 self?.log?("liaison locale : téléphone non reconnu")
                 return self?.tryNext() ?? ()
             }
+            self.peerBinary = hello["bin"] != nil
             let mine = NavetteCrypto.localProof(key: keys.localKey, role: .mac, macNonce: macNonce, phoneNonce: phoneNonce)
             self.write(["type": "auth", "proof": mine], on: connection)
             self.readFrame(on: connection, limit: Self.maxHandshakeFrame, attempt: current) { [weak self] ready in
@@ -241,6 +254,7 @@ public final class LocalLink {
         readFrame(on: connection, limit: Self.maxFrame, attempt: current) { [weak self] message in
             guard let self else { return }
             self.lastHeard = Date()
+            if let chunk = message["chunk"] as? NavetteCrypto.Chunk { self.onChunk?(chunk) }
             if message["type"] as? String == "clip",
                let id = message["id"] as? String, let iv = message["iv"] as? String, let data = message["data"] as? String {
                 self.onClip?(NavetteCrypto.Clip(id: id, iv: iv, data: data))
@@ -274,12 +288,12 @@ public final class LocalLink {
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] header, _, _, error in
             guard let self, current == self.attempt else { return }
             guard error == nil, let header, header.count == 4 else { return self.lost(attempt: current) }
-            let length = Int(header.reduce(UInt32(0)) { $0 << 8 | UInt32($1) })
+            let (length, binary) = LinkWire.header(header)
             guard length > 0, length <= limit else { return self.lost(attempt: current) }
             connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] body, _, _, error in
                 guard let self, current == self.attempt else { return }
                 guard error == nil, let body, body.count == length,
-                      let message = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                      let message = LinkWire.message(body, binary: binary)
                 else { return self.lost(attempt: current) }
                 handler(message)
             }

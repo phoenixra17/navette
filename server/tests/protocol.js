@@ -64,6 +64,40 @@ export function open(encKey, { id, iv, data }, from = 'mac') {
   return JSON.parse(plaintext.toString('utf8'));
 }
 
+/**
+ * Format binaire (morceaux de fichier, voir « Binary chunks » dans PROTOCOL.md) : en clair, 4 octets
+ * de longueur (gros-boutiste), les métadonnées en JSON, puis les octets bruts — sans base64.
+ * Données associées distinctes (`navette/v2b|…`) : un bloc binaire ne se lit jamais comme du JSON.
+ */
+function aadBinary(from, id) {
+  if (!ROLES.includes(from)) throw new Error(`rôle inconnu : ${from}`);
+  return Buffer.from(`navette/v2b|${from}|${id}`, 'utf8');
+}
+
+/** Renvoie { id, iv, box } avec iv et box en octets (box = chiffré ‖ tag). */
+export function sealBinary(encKey, meta, bytes, id = crypto.randomUUID(), from = 'mac',
+  iv = crypto.randomBytes(12), t = Date.now()) {
+  const json = Buffer.from(JSON.stringify({ ...meta, t }), 'utf8');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(json.length);
+  const cipher = crypto.createCipheriv('aes-256-gcm', encKey, iv);
+  cipher.setAAD(aadBinary(from, id));
+  const plaintext = Buffer.concat([length, json, bytes]);
+  return { id, iv, box: Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]) };
+}
+
+/** Renvoie { meta, bytes }. */
+export function openBinary(encKey, { id, iv, box }, from = 'mac') {
+  if (box.length <= 16) throw new Error('élément tronqué');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', encKey, iv);
+  decipher.setAAD(aadBinary(from, id));
+  decipher.setAuthTag(box.subarray(box.length - 16));
+  const plaintext = Buffer.concat([decipher.update(box.subarray(0, box.length - 16)), decipher.final()]);
+  const length = plaintext.readUInt32BE(0);
+  if (4 + length > plaintext.length) throw new Error('métadonnées tronquées');
+  return { meta: JSON.parse(plaintext.subarray(4, 4 + length).toString('utf8')), bytes: plaintext.subarray(4 + length) };
+}
+
 /** Refuse les messages reçus en direct qui sont périmés ou déjà vus (rejeu). */
 export class ReplayGuard {
   constructor(capacity = 4096) {
