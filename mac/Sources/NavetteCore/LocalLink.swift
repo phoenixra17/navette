@@ -1,11 +1,14 @@
 import CryptoKit
 import Foundation
 import Network
+import SystemConfiguration
 
 /// Liaison directe avec le téléphone, sans serveur (voir « Liaison locale » dans PROTOCOL.md).
 /// Le téléphone écoute et s'annonce en Bonjour (`_navette._tcp`) ; le Mac le cherche et s'y connecte.
-/// Candidats, dans l'ordre : adresse forcée (`NAVETTE_LOCAL=hôte:port`), Bonjour, puis les adresses
-/// que le téléphone a envoyées par le relais (Wi-Fi, point d'accès, Tailscale).
+/// Candidats, dans l'ordre : adresse forcée (`NAVETTE_LOCAL=hôte:port`), Bonjour, les adresses que
+/// le téléphone a envoyées par le relais (Wi-Fi, point d'accès, Tailscale), puis la passerelle du
+/// Mac : sur le point d'accès du téléphone, c'est le téléphone lui-même, joignable sans Bonjour ni
+/// internet.
 /// Tout se passe sur la file principale.
 public final class LocalLink {
     public enum State: Equatable {
@@ -42,7 +45,9 @@ public final class LocalLink {
     private var connection: NWConnection?
     /// Incrémenté à chaque tentative : les rappels d'une tentative abandonnée sont ignorés.
     private var attempt = 0
-    private var queue: [NWEndpoint] = []
+    /// Candidats restants, avec leur origine (pour le journal).
+    private var queue: [(endpoint: NWEndpoint, source: String)] = []
+    private var currentSource = ""
     private var retryTimer: Timer?
     private var retryDelay: TimeInterval = 2
     private var handshakeTimer: Timer?
@@ -121,7 +126,11 @@ public final class LocalLink {
     private func tryCandidates() {
         retryTimer?.invalidate()
         guard keys != nil else { return }
-        queue = [manual].compactMap { $0 } + bonjour + announced
+        queue = [manual].compactMap { $0 }.map { ($0, "adresse forcée") }
+            + bonjour.map { ($0, "Bonjour") } + announced.map { ($0, "adresse annoncée") }
+        if let gateway = Self.gateway(), !queue.contains(where: { $0.endpoint == gateway }) {
+            queue.append((gateway, "passerelle"))
+        }
         tryNext()
     }
 
@@ -135,7 +144,8 @@ public final class LocalLink {
             retryDelay = min(retryDelay * 2, 60)
             return
         }
-        let endpoint = queue.removeFirst()
+        let (endpoint, source) = queue.removeFirst()
+        currentSource = source
         let tcp = NWProtocolTCP.Options()
         tcp.connectionTimeout = 3
         tcp.noDelay = true
@@ -221,7 +231,7 @@ public final class LocalLink {
         else if path?.usesInterfaceType(.loopback) == true { via = "adresse forcée" }
         else { via = "Tailscale" } // utun
         let remote = path?.remoteEndpoint.map { "\($0)" } ?? "?"
-        log?("liaison locale établie (\(via), \(remote))")
+        log?("liaison locale établie (\(via), \(currentSource), \(remote))")
         state = .connected(via: via)
         pingTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.ping() }
         receiveLoop(on: connection, attempt: current)
@@ -277,6 +287,21 @@ public final class LocalLink {
     }
 
     // MARK: Utilitaires
+
+    /// Port d'écoute du téléphone (voir LocalLink.kt).
+    static let phonePort: NWEndpoint.Port = 3201
+
+    /// Routeur du réseau actuel s'il est privé (10/8, 172.16/12, 192.168/16) : le téléphone quand le
+    /// Mac est sur son point d'accès.
+    static func gateway() -> NWEndpoint? {
+        guard let info = SCDynamicStoreCopyValue(nil, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
+              let router = info["Router"] as? String else { return nil }
+        let parts = router.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return nil }
+        let isPrivate = parts[0] == 10 || (parts[0] == 172 && (16...31).contains(parts[1]))
+            || (parts[0] == 192 && parts[1] == 168)
+        return isPrivate ? .hostPort(host: NWEndpoint.Host(router), port: phonePort) : nil
+    }
 
     static func endpoint(from string: String) -> NWEndpoint? {
         guard let colon = string.lastIndex(of: ":"),
