@@ -17,34 +17,22 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 import org.json.JSONObject
 
 /**
- * Service de premier plan qui garde le WebSocket ouvert et écrit dans le presse-papier
+ * Service de premier plan qui garde les liaisons avec le Mac ouvertes et écrit dans le presse-papier
  * ce qui arrive du Mac. Android autorise l'écriture en arrière-plan (seule la lecture est bloquée).
  */
-class RelayService : Service() {
+class NavetteService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var settings: Settings
-    private var socket: WebSocket? = null
-    private var retryDelayMs = 1_000L
     private var lastEvent: String? = null
     private var lastReceived: ClipContent? = null
     private var lastReceivedAt = 0L
     private var lastSent: ClipContent? = null
     private var lastSentAt = 0L
     private var autoCopy: AutoCopy? = null
-    private val retry = Runnable { connect() }
 
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            // Nouveau réseau (Wi-Fi ↔ 4G) : inutile d'attendre la fin du délai de reconnexion.
-            main.post { if (Relay.state != Relay.State.CONNECTED) reconnectNow() }
-        }
-    }
 
     private val stateListener: () -> Unit = { updateNotification() }
 
@@ -57,8 +45,7 @@ class RelayService : Service() {
         NetworkStatus.current = network
         createChannel()
         startForeground(NOTIF_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        Relay.addListener(stateListener)
-        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
+        Transport.addListener(stateListener)
         connect()
         refreshAutoCopy()
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -85,7 +72,7 @@ class RelayService : Service() {
         autoAccess = autoCopy?.access
         autoRetryAt = autoCopy?.retryAt ?: 0L
         updateNotification()
-        Relay.notifyListeners()
+        Transport.notifyListeners()
     }
 
     private fun autoSend(content: ClipContent) {
@@ -95,7 +82,7 @@ class RelayService : Service() {
         if (content == lastSent && now - lastSentAt < DEDUP_MS) return
         lastSent = content
         lastSentAt = now
-        Relay.send(settings, content) { error ->
+        Transport.send(settings, content) { error ->
             lastEvent = if (error == null) "Envoyé : ${content.preview}" else "Échec d’envoi : $error"
             updateNotification()
         }
@@ -114,7 +101,6 @@ class RelayService : Service() {
     }
 
     override fun onDestroy() {
-        main.removeCallbacks(retry)
         LocalLink.stop()
         localId = null
         autoCopy?.stop()
@@ -122,73 +108,21 @@ class RelayService : Service() {
         network.stop()
         if (NetworkStatus.current === network) NetworkStatus.current = null
         main.removeCallbacks(sendStatusLater)
-        Relay.socket = null
-        socket?.close(1000, "arrêt")
-        socket = null
-        Relay.removeListener(stateListener)
-        runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) }
-        Relay.setState(Relay.State.OFF)
+        Transport.removeListener(stateListener)
         super.onDestroy()
     }
 
-    private fun reconnectNow() {
-        retryDelayMs = 1_000L
-        connect()
-    }
+    private fun reconnectNow() = connect()
 
     private fun connect() {
-        main.removeCallbacks(retry)
-        socket?.cancel()
-        socket = null
-        Relay.socket = null
-        val keys = settings.keys()
-        if (keys == null) {
-            Relay.setState(Relay.State.OFF, "pas encore appairé")
-            return
-        }
+        val keys = settings.keys() ?: return
         startLocal(keys)
-        Relay.setState(Relay.State.CONNECTING)
-        socket = Relay.openSocket(settings, keys, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                main.post {
-                    if (webSocket !== socket) return@post
-                    retryDelayMs = 1_000L
-                    Relay.socket = webSocket
-                    Relay.setState(Relay.State.CONNECTED)
-                    sendBattery()
-                    announceLocal()
-                }
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
-                if (msg.optString("type") == "clip") receive(msg, keys)
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                main.post { if (webSocket === socket) lost("connexion fermée") }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                main.post {
-                    if (webSocket !== socket) return@post
-                    if (response?.code == 401) {
-                        socket = null
-                        Relay.socket = null
-                        Relay.setState(Relay.State.UNAUTHORIZED, "jeton refusé par le serveur")
-                        main.postDelayed(retry, 60_000L)
-                    } else {
-                        lost(t.message ?: "serveur injoignable")
-                    }
-                }
-            }
-        })
     }
 
-    /** Élément chiffré venu du Mac, par le relais ou en direct. Appelé depuis n'importe quel fil. */
+    /** Élément chiffré venu du Mac, en direct. Appelé depuis n'importe quel fil. */
     private fun receive(msg: JSONObject, keys: NavetteCrypto.Keys) {
         val received = runCatching {
-            // Morceau de fichier : trame binaire en direct, ou base64 dans un élément du relais.
+            // Morceau de fichier : trame binaire.
             val clip = if (msg.optString("type") == "chunk") null else NavetteCrypto.Clip.fromJson(msg)
             val json = clip?.let { runCatching { NavetteCrypto.open(keys.encKey, it) }.getOrNull() }
             val (id, payload) = if (json != null) clip.id to json else {
@@ -197,7 +131,7 @@ class RelayService : Service() {
                 if (meta.optString("kind") != "file") return
                 chunk.id to meta.put("data", bytes)
             }
-            // Déjà reçu ou trop ancien : le serveur ne peut pas rejouer une réponse ou une sonnerie.
+            // Déjà reçu ou trop ancien : pas de réponse ou de sonnerie rejouée.
             if (!replayGuard.accept(id, payload.optLong("t", -1L))) return
             payload
         }
@@ -219,22 +153,6 @@ class RelayService : Service() {
         localId = keys.localId
     }
 
-    /** Dit au Mac, par le relais, où joindre le téléphone en direct (utile si Bonjour ne passe pas). */
-    private fun announceLocal() {
-        val announcement = LocalLink.announcement() ?: return
-        if (socket == null) return
-        Relay.sendPayload(settings, announcement, ephemeral = true)
-    }
-
-    private fun lost(reason: String) {
-        val wasConnected = Relay.socket != null
-        socket = null
-        Relay.socket = null
-        if (wasConnected) sendBattery() // dit au Mac, par la liaison directe, que le relais est perdu
-        Relay.setState(Relay.State.ERROR, reason)
-        main.postDelayed(retry, retryDelayMs)
-        retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000L)
-    }
 
     /** Message venu du Mac : presse-papier, ou commande (réponse, sonnerie, lien…). */
     private fun handle(payload: JSONObject) {
@@ -246,20 +164,21 @@ class RelayService : Service() {
             "reply" -> {
                 val key = payload.optString("key")
                 val ok = NotifListener.instance?.reply(key, payload.optString("text")) == true
-                Relay.sendPayload(
+                Transport.sendPayload(
                     settings, JSONObject().put("kind", "reply-result").put("key", key).put("ok", ok), ephemeral = true,
                 )
             }
             "file", "file-end", "file-ack", "file-cancel" -> FileTransfers.receive(this, payload)
             "notif-dismiss" -> NotifListener.instance?.dismiss(payload.optString("key"))
             "ring" -> Ringer.start(this)
+            "hotspot" -> {
+                HotspotRequest.post(this)
+                Transport.sendPayload(settings, JSONObject().put("kind", "hotspot-ok"), ephemeral = true)
+            }
             "ring-stop" -> Ringer.stop(this)
             "url" -> Links.open(this, payload.optString("url"))
             "sync" -> {
-                Relay.macOnRelay = payload.optBoolean("relay", false)
-                Log.i("NavetteLocal", "sync : Mac sur le relais = ${Relay.macOnRelay}, téléphone = ${Relay.socket != null}")
                 sendBattery()
-                announceLocal()
             }
         }
     }
@@ -273,12 +192,11 @@ class RelayService : Service() {
     private val sendStatusLater = Runnable { sendBattery() }
 
     private fun onNetworkChanged() {
-        Relay.notifyListeners() // diagnostic de l'écran principal
+        Transport.notifyListeners() // diagnostic de l'écran principal
         // Le type de réseau part aussitôt ; le signal, qui bouge sans cesse, au plus une fois par minute.
         main.removeCallbacks(sendStatusLater)
         val wait = if (network.label != sentNetwork) 0L else (sentAt + 60_000L - System.currentTimeMillis())
         if (wait <= 0) sendBattery() else main.postDelayed(sendStatusLater, wait)
-        announceLocal() // nos adresses ont peut-être changé
     }
 
     private var batteryLevel = -1
@@ -299,10 +217,10 @@ class RelayService : Service() {
     }
 
     private fun sendBattery() {
-        if (batteryLevel < 0 || (socket == null && !LocalLink.isConnected)) return
+        if (batteryLevel < 0 || !LocalLink.isConnected) return
         sentNetwork = network.label
         sentAt = System.currentTimeMillis()
-        Relay.sendPayload(
+        Transport.sendPayload(
             settings,
             JSONObject()
                 .put("kind", "battery")
@@ -310,9 +228,7 @@ class RelayService : Service() {
                 .put("charging", batteryCharging)
                 .put("net", network.label)
                 .put("signal", network.bars)
-                // Connecté (pas seulement en cours de connexion) : le Mac choisit alors le relais
-                // plutôt que le Bluetooth pour une grosse image.
-                .put("relay", Relay.socket != null),
+                ,
             ephemeral = true,
         )
     }
@@ -336,13 +252,7 @@ class RelayService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val title = if (LocalLink.isConnected) "Connecté au Mac en direct" else when (Relay.state) {
-            Relay.State.CONNECTED -> "Connecté au Mac"
-            Relay.State.CONNECTING -> "Connexion…"
-            Relay.State.UNAUTHORIZED -> "Jeton refusé par le serveur"
-            Relay.State.ERROR -> "Hors ligne — nouvelle tentative"
-            Relay.State.OFF -> "Navette"
-        }
+        val title = if (LocalLink.isConnected) "Connecté au Mac en direct" else "Mac hors de portée"
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
         )
@@ -392,11 +302,11 @@ class RelayService : Service() {
             private set
 
         fun refresh(context: Context) {
-            context.startForegroundService(Intent(context, RelayService::class.java).setAction(ACTION_REFRESH))
+            context.startForegroundService(Intent(context, NavetteService::class.java).setAction(ACTION_REFRESH))
         }
 
         fun start(context: Context, reconnect: Boolean = false) {
-            val intent = Intent(context, RelayService::class.java)
+            val intent = Intent(context, NavetteService::class.java)
             if (reconnect) intent.action = ACTION_RECONNECT
             context.startForegroundService(intent)
         }

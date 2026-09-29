@@ -6,7 +6,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Vecteurs produits par l'implémentation de référence (server/tests/protocol.js). */
+/** Vecteurs de référence, communs aux apps Mac et Android. */
 class NavetteCryptoTest {
     private val secret = "q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ"
 
@@ -58,7 +58,7 @@ class NavetteCryptoTest {
         assertEquals(image, back)
     }
 
-    /** v2 : un élément du téléphone renvoyé au téléphone (par le serveur, par exemple) ne se déchiffre pas. */
+    /** v2 : un élément du téléphone renvoyé au téléphone ne se déchiffre pas. */
     @Test
     fun reflectedClipIsRejected() {
         val key = NavetteCrypto.deriveKeys(secret).encKey
@@ -94,7 +94,7 @@ class NavetteCryptoTest {
         assertTrue("décalage d’horloge d’une minute", guard.accept("d", now - 60_000, now))
     }
 
-    /** Vecteur produit par server/tests/protocol.js (sealBinary), comme côté Mac. */
+    /** Vecteur de référence, comme côté Mac. */
     @Test
     fun opensReferenceChunk() {
         val key = NavetteCrypto.deriveKeys(secret).encKey
@@ -112,7 +112,7 @@ class NavetteCryptoTest {
     }
 
     @Test
-    fun chunkRoundTripThroughRelayForm() {
+    fun chunkRoundTripAsClip() {
         val key = NavetteCrypto.deriveKeys(secret).encKey
         val data = ByteArray(100_000) { (it % 253).toByte() }
         val sealed = NavetteCrypto.sealChunk(key, org.json.JSONObject().put("kind", "file").put("off", 42), data)

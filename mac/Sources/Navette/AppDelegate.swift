@@ -6,7 +6,6 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSDraggingDestination {
     private var config = Config.loadOrCreate()
     private var keys: NavetteCrypto.Keys!
-    private let relay = Relay()
     private let local = LocalLink()
     private let ble = BleLink()
     private let watcher = ClipboardWatcher()
@@ -49,16 +48,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             keys = try? NavetteCrypto.deriveKeys(secret: config.secret)
         }
 
-        relay.onState = { [weak self] state in
-            guard let self else { return }
-            self.updateIcon()
-            // Le téléphone renvoie sa batterie et ses adresses, et apprend si le Mac est joignable par le relais.
-            let online = state == .connected
-            if online != self.bridge.macOnRelay || online {
-                self.bridge.macOnRelay = online
-                self.bridge.sync()
-            }
-        }
         local.log = { Journal.write($0) }
         local.onState = { [weak self] _ in
             guard let self else { return }
@@ -83,11 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         hotspot.automatic = config.hotspotAuto ?? false
         hotspot.networkName = config.hotspotNetwork
         hotspot.askPassword = { [weak self] ssid in self?.askHotspotPassword(ssid) }
+        hotspot.askPhone = { [weak self] in
+            guard let self, self.local.isConnected || self.ble.isConnected else { return false }
+            self.sendEvent(["kind": "hotspot"])
+            return true
+        }
         hotspot.onChange = { [weak self] in
             if let status = self?.hotspot.status { self?.lastEvent = status }
         }
         hotspot.start()
-        relay.onClip = { [weak self] clip, from in self?.received(clip, from: from) }
         watcher.onContent = { [weak self] content in
             guard let self, self.config.autoSend else { return }
             self.send(content)
@@ -106,8 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         fileTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.assembler.expire().forEach { self?.fileEvent($0) }
         }
-        relay.start(config: config, token: keys.token)
-        local.start(keys: keys)
+        // NAVETTE_LOCAL=off : pas de liaison Wi-Fi (tests du Bluetooth sans toucher au réseau).
+        if ProcessInfo.processInfo.environment["NAVETTE_LOCAL"] != "off" { local.start(keys: keys) }
         ble.start(keys: keys)
         ble.wanted = !local.isConnected
         watcher.start()
@@ -115,14 +108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.relay.reconnectNow()
             self?.local.reconnectNow()
         }
 
-        // Premier lancement : le serveur n'a pas encore ce jeton, on guide tout de suite.
+        // Premier lancement : on guide tout de suite vers l'appairage.
         if !UserDefaults.standard.bool(forKey: "setupShown") {
             UserDefaults.standard.set(true, forKey: "setupShown")
-            if config.server.isEmpty { editServer() } // le QR d'appairage contient l'adresse
             showPairing()
         }
     }
@@ -145,36 +136,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    /// Notification, commande… : n'écrase pas le dernier presse-papier gardé par le serveur.
+    /// Notification, commande… : message chiffré comme le reste.
     private func sendEvent(_ json: [String: Any]) {
         guard let clip = try? NavetteCrypto.seal(json: json, key: keys.encKey) else { return }
         transmit(clip, ephemeral: true)
     }
 
-    /// Wi-Fi direct, sinon Bluetooth, sinon (ou en cas d'échec) relais. Une grosse image évite le
-    /// Bluetooth (quelques dizaines de Ko/s) quand le relais la porte jusqu'au téléphone.
+    /// Wi-Fi direct, sinon Bluetooth ; en cas d'échec du Wi-Fi, le Bluetooth s'il est là.
     private func transmit(_ clip: NavetteCrypto.Clip, ephemeral: Bool = false, completion: ((Bool) -> Void)? = nil) {
-        let viaRelay = { [weak self] in self?.relay.send(clip, ephemeral: ephemeral, completion: completion) ?? () }
-        let fallback: (Bool) -> Void = { ok in if ok { completion?(true) } else { viaRelay() } }
         let size = clip.data.utf8.count
         let route: (String) -> Void = { if !ephemeral { Journal.write("envoi par \($0) (\(size / 1024) Ko)") } }
+        let viaBluetooth = { [weak self] in
+            guard let self, self.ble.send(clip, ephemeral: ephemeral, completion: { completion?($0) }) else {
+                return completion?(false) ?? ()
+            }
+        }
+        let fallback: (Bool) -> Void = { ok in if ok { completion?(true) } else { viaBluetooth() } }
         if local.send(clip, ephemeral: ephemeral, completion: fallback) { return route("Wi-Fi") }
-        let big = size > 400_000 // ≈ 256 Ko d'image, une fois en base64 et chiffrée
-        let relayCarries = relay.state == .connected && bridge.phoneOnRelay
-        if !(big && relayCarries), ble.send(clip, ephemeral: ephemeral, completion: fallback) { return route("Bluetooth") }
-        route("le relais")
-        viaRelay()
+        route("Bluetooth")
+        viaBluetooth()
     }
 
     private func received(_ clip: NavetteCrypto.Clip, from: String) {
         guard let data = try? NavetteCrypto.openData(clip, key: keys.encKey),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            // Par le relais, un morceau de fichier binaire arrive en base64 dans un Clip.
-            if let chunk = NavetteCrypto.Chunk(clip: clip), received(chunk) { return }
             lastEvent = "↓ élément illisible (secret différent ?)"
             return
         }
-        // Un message déjà reçu ou trop ancien est ignoré : le serveur ne peut pas rejouer nos commandes.
+        // Un message déjà reçu ou trop ancien est ignoré : pas de commande rejouée.
         guard replayGuard.accept(id: clip.id, t: (json["t"] as? NSNumber)?.doubleValue) else {
             Journal.write("élément \(clip.id.prefix(8)) ignoré : rejoué ou périmé")
             return
@@ -193,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             return
         }
+        if json["kind"] as? String == "hotspot-ok" { return hotspot.phoneAcknowledged() }
         if bridge.handle(json) { return }
         guard let payload = try? JSONDecoder().decode(NavetteCrypto.Payload.self, from: data),
               let content = payload.content else { return }
@@ -202,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         flash("arrow.down.circle.fill")
     }
 
-    /// Morceau de fichier binaire (liaison directe, ou relais). false s'il ne se déchiffre pas.
+    /// Morceau de fichier binaire (liaison directe). false s'il ne se déchiffre pas.
     @discardableResult
     private func received(_ chunk: NavetteCrypto.Chunk) -> Bool {
         guard let (meta, bytes) = try? NavetteCrypto.openChunk(chunk, key: keys.encKey) else {
@@ -264,12 +254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return result
     }
 
-    /// Wi-Fi direct pour tout ; sinon le relais jusqu'à 25 Mo, puis le Bluetooth jusqu'à 2 Mo.
+    /// Wi-Fi direct pour tout ; sinon le Bluetooth jusqu'à 2 Mo.
     private func fileRoute(size: Int64) -> (chunk: Int, bluetooth: Bool)? {
         if local.isConnected { return (FileChunks.chunkSize, false) }
-        if relay.state == .connected && bridge.phoneOnRelay && size <= FileChunks.maxRelayBytes {
-            return (FileChunks.chunkSize, false)
-        }
         if ble.isConnected && size <= FileChunks.maxBluetoothBytes { return (FileChunks.bluetoothChunkSize, true) }
         return nil
     }
@@ -290,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 return
             }
             cleanup()
-            let why = local.isConnected || relay.state == .connected || ble.isConnected
+            let why = local.isConnected || ble.isConnected
                 ? "trop gros sans liaison Wi-Fi avec le téléphone (\(Self.bytes(size)))"
                 : "téléphone injoignable"
             fileFailed(displayName, why)
@@ -300,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let mime = UTType(filenameExtension: (displayName as NSString).pathExtension)?.preferredMIMEType
         guard let sender = FileSender(
             url: url, name: displayName, mime: mime,
-            // Chemin réévalué à chaque morceau : relais perdu en route → Bluetooth, Wi-Fi retrouvé…
+            // Chemin réévalué à chaque morceau : Wi-Fi perdu en route → Bluetooth, Wi-Fi retrouvé…
             chunkSize: { [weak self] in self?.fileRoute(size: size)?.chunk },
             seal: { try? NavetteCrypto.seal(json: $0, key: key) },
             sealChunk: { try? NavetteCrypto.sealChunk(meta: $0, bytes: $1, key: key) },
@@ -342,28 +329,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         sender.start()
     }
 
-    /// Même principe que `transmit`, mais un gros fichier ne se rabat jamais sur le relais. Un morceau
-    /// part en trame binaire sur une liaison directe, en base64 (une seule fois) par le relais.
+    /// Même principe que `transmit`. Un morceau part en trame binaire.
     private func transmitChunk(_ outgoing: FileOutgoing, fileSize: Int64, bluetooth: Bool,
                                completion: @escaping (Bool) -> Void) {
-        let clip: () -> NavetteCrypto.Clip = { // base64 seulement si nécessaire
-            switch outgoing {
-            case .message(let message): return message
-            case .chunk(let chunk): return chunk.clip
-            }
+        switch outgoing {
+        case .chunk(let chunk):
+            if local.send(chunk, completion: completion) { return }
+            if bluetooth, ble.send(chunk, completion: completion) { return }
+        case .message(let message):
+            if local.send(message, ephemeral: true, completion: completion) { return }
+            if bluetooth, ble.send(message, ephemeral: true, completion: completion) { return }
         }
-        let viaRelay = { [weak self] in
-            guard let self, fileSize <= FileChunks.maxRelayBytes else { return completion(false) }
-            self.relay.send(clip(), ephemeral: true, completion: completion)
-        }
-        let fallback: (Bool) -> Void = { ok in if ok { completion(true) } else { viaRelay() } }
-        if case .chunk(let chunk) = outgoing {
-            if local.send(chunk, completion: fallback) { return }
-            if bluetooth, ble.send(chunk, completion: fallback) { return }
-        }
-        if local.send(clip(), ephemeral: true, completion: fallback) { return }
-        if bluetooth, ble.send(clip(), ephemeral: true, completion: fallback) { return }
-        viaRelay()
+        completion(false)
     }
 
     private func fileFailed(_ name: String, _ reason: String) {
@@ -461,14 +438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private func updateIcon() {
         guard flashTimer == nil else { return }
-        let symbol: String
-        switch relay.state {
-        case _ where local.isConnected || ble.isConnected: symbol = "arrow.left.arrow.right.circle"
-        case .connected: symbol = "arrow.left.arrow.right.circle"
-        case .connecting: symbol = "arrow.left.arrow.right.circle"
-        case .disconnected, .unauthorized: symbol = "exclamationmark.circle"
-        }
-        setIcon(symbol, dimmed: relay.state != .connected && !local.isConnected && !ble.isConnected)
+        let linked = local.isConnected || ble.isConnected
+        setIcon(linked ? "arrow.left.arrow.right.circle" : "exclamationmark.circle", dimmed: !linked)
     }
 
     private func setIcon(_ symbol: String, dimmed: Bool = false) {
@@ -491,16 +462,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let host = URL(string: config.server)?.host ?? config.server
-
-        let status: String
-        switch relay.state {
-        case .connected: status = "● Connecté à \(host)"
-        case .connecting: status = "◌ Connexion à \(host)…"
-        case .disconnected(let why): status = "○ Serveur hors ligne — \(why)"
-        case .unauthorized: status = "⚠︎ Jeton refusé : mettez-le à jour sur le serveur"
-        }
-        menu.addItem(disabled(status))
         switch local.state {
         case .connected(let via): menu.addItem(disabled("● Liaison directe avec le téléphone (\(via))"))
         case .connecting: menu.addItem(disabled("◌ Liaison directe : connexion…"))
@@ -566,9 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
 
         menu.addItem(item("Appairer le téléphone…", #selector(showPairing)))
-        menu.addItem(item("Copier le jeton du serveur", #selector(copyToken)))
-        menu.addItem(item("Adresse du serveur…", #selector(editServer)))
-        if relay.state != .connected {
+        if !local.isConnected && !ble.isConnected {
             menu.addItem(item("Se reconnecter maintenant", #selector(reconnect)))
         }
         let login = item("Ouvrir au démarrage du Mac", #selector(toggleLogin))
@@ -780,52 +739,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func showPairing() {
         if pairingWindow == nil {
-            pairingWindow = PairingWindow(config: config, token: keys.token, fingerprint: keys.fingerprint) { [weak self] in
-                self?.copyToken()
-            }
+            pairingWindow = PairingWindow(config: config, fingerprint: keys.fingerprint)
         }
         NSApp.activate(ignoringOtherApps: true)
         pairingWindow?.showWindow(nil)
         pairingWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func copyToken() {
-        // Écrit via le watcher : le jeton ne doit pas partir vers le téléphone.
-        watcher.write(.text(keys.token))
-        lastEvent = "Jeton copié (à coller dans NAVETTE_TOKEN)"
-    }
-
-    @objc private func editServer() {
-        let alert = NSAlert()
-        alert.messageText = "Adresse du serveur Navette"
-        alert.informativeText = "L’adresse de votre serveur Navette, par exemple http://192.168.1.10:3200 sur votre réseau local, "
-            + "ou son adresse Tailscale (100.x.y.z) pour qu’il soit joignable aussi en 4G."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.stringValue = config.server
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Enregistrer")
-        alert.addButton(withTitle: "Annuler")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value), ["http", "https"].contains(url.scheme ?? ""), url.host != nil else {
-            let error = NSAlert()
-            error.messageText = "Adresse invalide"
-            error.informativeText = "Elle doit commencer par http:// ou https://."
-            error.runModal()
-            return
-        }
-        config.server = value.hasSuffix("/") ? String(value.dropLast()) : value
-        config.save()
-        pairingWindow?.close()
-        pairingWindow = nil // le QR contient l'adresse : il faut le régénérer
-        relay.start(config: config, token: keys.token)
-    }
 
     @objc private func reconnect() {
-        relay.reconnectNow()
         local.reconnectNow()
     }
 

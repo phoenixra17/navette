@@ -29,7 +29,7 @@ final class FileTransferTests: XCTestCase {
         }
     }
 
-    /// Vecteur produit par server/tests/protocol.js (sealBinary).
+    /// Vecteur de référence, commun aux apps Mac et Android.
     func testOpensReferenceChunk() throws {
         let keys = try NavetteCrypto.deriveKeys(secret: "q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ")
         let chunk = NavetteCrypto.Chunk(
@@ -220,7 +220,7 @@ final class FileTransferTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: XCTUnwrap(result)), Data(bytes))
     }
 
-    /// Plus de chemin un moment (relais perdu, Bluetooth pas encore connecté), puis un autre, avec
+    /// Plus de chemin un moment (Wi-Fi perdu, Bluetooth pas encore connecté), puis un autre, avec
     /// des morceaux plus petits : l'envoi reprend et aboutit.
     func testRouteChangesDuringSend() throws {
         let keys = try NavetteCrypto.deriveKeys(secret: NavetteCrypto.newSecret())

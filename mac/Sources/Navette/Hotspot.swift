@@ -21,6 +21,9 @@ final class Hotspot {
     var networkName: String?
     /// Demande le mot de passe du point d'accès à l'utilisateur (fourni par AppDelegate) ; nil = annulé.
     var askPassword: ((String) -> String?)?
+    /// Demande à Navette sur le téléphone d'afficher la notification qui déclenche la routine
+    /// (fourni par AppDelegate) ; false = aucune liaison avec le téléphone.
+    var askPhone: (() -> Bool)?
 
     private(set) var status: String?
     private(set) var isOnline = true
@@ -28,6 +31,7 @@ final class Hotspot {
     private var closeTimer: Timer?
     private var handsfree: HandsfreeLink?
     private var offlineTimer: Timer?
+    private var ackTimer: Timer?
     private var joinAttempt = 0 // essais de connexion, une fois le réseau visible
     private let monitor = NWPathMonitor()
 
@@ -59,8 +63,31 @@ final class Hotspot {
         return phones.first
     }
 
+    /// Par Navette d'abord : le téléphone affiche une notification, condition de la routine
+    /// (« Notification reçue › Navette »). Sans réponse, par le kit mains-libres, pour une routine
+    /// encore réglée sur « Appareil Bluetooth › Mac connecté ».
     func request() {
-        guard handsfree == nil else { return } // demande déjà en cours
+        guard handsfree == nil, ackTimer == nil else { return } // demande déjà en cours
+        lastRequest = Date()
+        guard askPhone?() == true else { return requestByHandsfree() }
+        setStatus("Demande envoyée au téléphone…")
+        ackTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
+            self?.ackTimer = nil
+            self?.requestByHandsfree()
+        }
+    }
+
+    /// Le téléphone a affiché la notification : la routine allume le point d'accès.
+    func phoneAcknowledged() {
+        guard let ackTimer else { return }
+        ackTimer.invalidate()
+        self.ackTimer = nil
+        setStatus("Point d’accès demandé, connexion du Mac…")
+        joinHotspot(phoneName: phoneName)
+    }
+
+    private func requestByHandsfree() {
+        guard handsfree == nil else { return }
         guard let device = target() else {
             setStatus("Aucun téléphone appairé en Bluetooth avec ce Mac")
             return

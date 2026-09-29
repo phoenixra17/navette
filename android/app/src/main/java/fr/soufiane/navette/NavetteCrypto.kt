@@ -10,7 +10,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Protocole Navette v2 — identique à server/tests/protocol.js et à l'app Mac.
+ * Protocole Navette v2 — identique à l'app Mac (vecteurs de test communs).
  * v2 : les données associées lient chaque élément à son expéditeur (« mac » ou « phone ») ; les
  * messages reçus en direct passent par [ReplayGuard].
  */
@@ -32,7 +32,7 @@ object NavetteCrypto {
 
     private fun aad(from: String, id: String) = "navette/v2|$from|$id".toByteArray(Charsets.UTF_8)
 
-    /** Élément chiffré tel qu'il circule par le serveur. */
+    /** Élément chiffré tel qu'il circule entre les appareils. */
     data class Clip(val id: String, val iv: String, val data: String) {
         fun toJson(): JSONObject = JSONObject().put("id", id).put("iv", iv).put("data", data)
 
@@ -97,7 +97,7 @@ object NavetteCrypto {
 
     private fun aadBinary(from: String, id: String) = "navette/v2b|$from|$id".toByteArray(Charsets.UTF_8)
 
-    /** [box] : chiffré ‖ tag. Tel quel sur une liaison directe, en base64 dans un [Clip] par le relais. */
+    /** [box] : chiffré ‖ tag, tel quel sur une liaison directe. */
     class Chunk(val id: String, val iv: ByteArray, val box: ByteArray) {
         fun toClip(): Clip {
             val b64 = Base64.getEncoder()
@@ -105,7 +105,7 @@ object NavetteCrypto {
         }
 
         companion object {
-            /** Un [Clip] du relais qui ne se lit pas en JSON est peut-être un morceau binaire. */
+            /** Un [Clip] qui ne se lit pas en JSON est peut-être un morceau binaire. */
             fun fromClip(clip: Clip): Chunk? = runCatching {
                 val b64 = Base64.getDecoder()
                 Chunk(clip.id, b64.decode(clip.iv), b64.decode(clip.data))
@@ -147,8 +147,8 @@ object NavetteCrypto {
 }
 
 /**
- * Refuse les messages reçus en direct qui sont périmés ou déjà vus : quelqu'un qui ne détient que le
- * jeton du serveur (le serveur lui-même, par exemple) ne peut pas rejouer une réponse ou une sonnerie.
+ * Refuse les messages reçus qui sont périmés ou déjà vus : un intermédiaire ne peut pas rejouer
+ * une réponse ou une sonnerie.
  */
 class ReplayGuard(private val capacity: Int = 4096) {
     private val seen = LinkedHashSet<String>()

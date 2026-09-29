@@ -7,9 +7,6 @@ import android.net.Uri
 class Settings(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("navette", Context.MODE_PRIVATE)
 
-    var server: String
-        get() = prefs.getString("server", "") ?: ""
-        set(value) = prefs.edit().putString("server", value.trim().trimEnd('/')).apply()
 
     var secret: String
         get() = prefs.getString("secret", "") ?: ""
@@ -32,22 +29,18 @@ class Settings(context: Context) {
         get() = prefs.getLong("lastClipAt", 0L)
         set(value) = prefs.edit().putLong("lastClipAt", value).apply()
 
-    val isPaired: Boolean get() = server.isNotEmpty() && secret.isNotEmpty()
+    val isPaired: Boolean get() = secret.isNotEmpty()
 
     /** Clés dérivées du secret, ou null si pas encore appairé. */
     fun keys(): NavetteCrypto.Keys? =
         if (isPaired) runCatching { NavetteCrypto.deriveKeys(secret) }.getOrNull() else null
 
-    /** Lit le QR affiché par l'app Mac : navette://pair?u=<serveur>&s=<secret>. */
+    /** Lit le QR affiché par l'app Mac : navette://pair?s=<secret>. */
     fun applyPairingUri(raw: String): Boolean {
         val uri = Uri.parse(raw)
         if (uri.scheme != "navette" || uri.host != "pair") return false
-        val server = uri.getQueryParameter("u") ?: return false
-        val secret = uri.getQueryParameter("s") ?: return false
-        if (!server.startsWith("http://") && !server.startsWith("https://")) return false
         if (runCatching { NavetteCrypto.deriveKeys(secret) }.isFailure) return false
         if (secret != this.secret) lastClipAt = 0L
-        this.server = server
         this.secret = secret
         return true
     }

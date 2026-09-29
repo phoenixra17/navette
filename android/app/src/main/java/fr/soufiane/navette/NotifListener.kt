@@ -90,14 +90,14 @@ class NotifListener : NotificationListenerService() {
             .put("text", text.take(2000))
             .put("canReply", reply != null)
         appIcon(sbn.packageName)?.let { payload.put("icon", it) }
-        Relay.sendPayload(settings, payload, ephemeral = true)
+        Transport.sendPayload(settings, payload, ephemeral = true)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         replyActions.remove(sbn.key)
         repliedAt.remove(sbn.key)
         if (sent.remove(sbn.key) == null) return // jamais transmise
-        Relay.sendPayload(settings, JSONObject().put("kind", "notif-removed").put("key", sbn.key), ephemeral = true)
+        Transport.sendPayload(settings, JSONObject().put("kind", "notif-removed").put("key", sbn.key), ephemeral = true)
     }
 
     /** Réponse tapée sur le Mac. Renvoie false si la notification a disparu entre-temps. */

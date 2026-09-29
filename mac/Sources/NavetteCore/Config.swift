@@ -2,7 +2,6 @@ import Foundation
 
 /// Réglages stockés dans ~/.navette/config.json (droits 600 : le secret y est en clair).
 public struct Config: Codable, Equatable {
-    public var server: String
     public var secret: String
     public var device: String
     public var autoSend: Bool
@@ -27,7 +26,7 @@ public struct Config: Codable, Equatable {
            let config = try? JSONDecoder().decode(Config.self, from: data) {
             return config
         }
-        let config = Config(server: "", // demandé au premier lancement
+        let config = Config(
                             secret: NavetteCrypto.newSecret(),
                             device: "mac",
                             autoSend: true)
@@ -46,24 +45,12 @@ public struct Config: Codable, Equatable {
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.file.path)
     }
 
-    /// http(s)://hôte:port → ws(s)://hôte:port/ws
-    public var webSocketURL: URL? {
-        guard var comps = URLComponents(string: server), comps.host?.isEmpty == false else { return nil }
-        comps.scheme = comps.scheme == "https" ? "wss" : "ws"
-        comps.path = comps.path.hasSuffix("/") ? comps.path + "ws" : comps.path + "/ws"
-        return comps.url
-    }
-
-    public var clipURL: URL? {
-        URL(string: server)?.appendingPathComponent("api/clip")
-    }
-
     /// Contenu du QR d'appairage lu par l'app Android.
     public var pairingURI: String {
         var comps = URLComponents()
         comps.scheme = "navette"
         comps.host = "pair"
-        comps.queryItems = [URLQueryItem(name: "u", value: server), URLQueryItem(name: "s", value: secret)]
+        comps.queryItems = [URLQueryItem(name: "s", value: secret)]
         return comps.string ?? ""
     }
 }

@@ -55,7 +55,7 @@ class MainActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        if (settings.isPaired) RelayService.start(this)
+        if (settings.isPaired) NavetteService.start(this)
         handlePairingLink(intent)
     }
 
@@ -65,19 +65,18 @@ class MainActivity : Activity() {
     }
 
     /** Lien navette://pair ouvert depuis l'appareil photo : on confirme avant d'appliquer, car
-     *  n'importe quelle app ou page web peut ouvrir ce lien, avec l'adresse de votre propre serveur
-     *  (relais partagé) mais son secret à elle. Le code de vérification doit être celui du Mac. */
+     *  n'importe quelle app ou page web peut ouvrir ce lien, avec son secret à elle. Le code de
+     *  vérification doit être celui du Mac. */
     private fun handlePairingLink(intent: Intent?) {
         val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
         setIntent(Intent(this, MainActivity::class.java))
-        val server = uri.getQueryParameter("u") ?: return
         val code = uri.getQueryParameter("s")?.let { runCatching { NavetteCrypto.deriveKeys(it) }.getOrNull() }
             ?.fingerprint ?: return Toast.makeText(this, "Ce n’est pas un code Navette", Toast.LENGTH_LONG).show()
         val replaces = if (settings.isPaired) "\n\n⚠️ Ce téléphone est déjà appairé : l’appairage actuel sera remplacé." else ""
         AlertDialog.Builder(this)
             .setTitle("Appairer avec ce Mac ?")
             .setMessage(
-                "Code de vérification : $code\nServeur : $server\n\n" +
+                "Code de vérification : $code\n\n" +
                     "Vérifiez que ce code est celui affiché par votre Mac (menu Navette › Appairer le téléphone…). " +
                     "S’il est différent, annulez : ce lien ne vient pas de votre Mac.$replaces",
             )
@@ -89,7 +88,7 @@ class MainActivity : Activity() {
     private fun applyPairing(raw: String) {
         if (settings.applyPairingUri(raw)) {
             Toast.makeText(this, "Appairé ✓", Toast.LENGTH_SHORT).show()
-            RelayService.start(this, reconnect = true)
+            NavetteService.start(this, reconnect = true)
             render()
         } else {
             Toast.makeText(this, "Ce n’est pas un code Navette", Toast.LENGTH_LONG).show()
@@ -99,16 +98,16 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         visible = true
-        Relay.addListener(stateListener)
+        Transport.addListener(stateListener)
         // Une autorisation vient peut-être d'être accordée (réglages ou ADB) : le service réévalue.
-        if (settings.isPaired) RelayService.refresh(this)
+        if (settings.isPaired) NavetteService.refresh(this)
         render()
     }
 
     override fun onPause() {
         visible = false
         autoStatus.removeCallbacks(tick)
-        Relay.removeListener(stateListener)
+        Transport.removeListener(stateListener)
         super.onPause()
     }
 
@@ -146,7 +145,6 @@ class MainActivity : Activity() {
         pairedActions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(button("Envoyer le presse-papier au Mac") { sendClipboard() })
-            addView(button("Récupérer le dernier élément") { fetchLast() })
             addView(button("Envoyer des fichiers au Mac…") { chooseFiles() })
 
             addView(text("Envoi automatique", 18f, bold = true).apply { setPadding(0, dp(24), 0, dp(4)) })
@@ -156,7 +154,7 @@ class MainActivity : Activity() {
                 setOnCheckedChangeListener { _, checked ->
                     if (checked == settings.autoSend) return@setOnCheckedChangeListener
                     settings.autoSend = checked
-                    RelayService.refresh(this@MainActivity)
+                    NavetteService.refresh(this@MainActivity)
                     render()
                 }
             }
@@ -216,8 +214,7 @@ class MainActivity : Activity() {
                 )
             }
             addView(bluetoothButton)
-            addView(button("Modifier l’adresse du serveur") { editServer() })
-            addView(button("Se reconnecter") { RelayService.start(this@MainActivity, reconnect = true) })
+            addView(button("Se reconnecter") { NavetteService.start(this@MainActivity, reconnect = true) })
         }
         column.addView(pairedActions)
 
@@ -232,17 +229,9 @@ class MainActivity : Activity() {
             return
         }
         pairedActions.visibility = View.VISIBLE
-        status.text = when (Relay.state) {
-            Relay.State.CONNECTED -> "● Connecté"
-            Relay.State.CONNECTING -> "◌ Connexion…"
-            Relay.State.UNAUTHORIZED -> "⚠ Jeton refusé par le serveur"
-            Relay.State.ERROR -> "○ Hors ligne — ${Relay.detail}"
-            Relay.State.OFF -> "○ Arrêté"
-        }
-        server.text = "Serveur : ${settings.server}\n" + (
-            LocalLink.description?.let { "Liaison directe avec le Mac : $it. Le serveur n’est pas nécessaire." }
-                ?: "Liaison directe : Mac introuvable (ni Wi-Fi commun ni Bluetooth : ${BleLink.status})."
-            )
+        status.text = if (LocalLink.isConnected) "● Connecté au Mac" else "○ Mac hors de portée"
+        server.text = LocalLink.description?.let { "Liaison directe avec le Mac : $it." }
+            ?: "Mac introuvable : ni Wi-Fi commun ni Bluetooth (${BleLink.status})."
         bluetoothButton.visibility = if (BleLink.hasPermissions(this)) View.GONE else View.VISIBLE
         val logs = AutoCopy.hasReadLogs(this)
         val overlay = AutoCopy.hasOverlay(this)
@@ -270,22 +259,22 @@ class MainActivity : Activity() {
         autoSwitch.isChecked = settings.autoSend
         autoSwitch.isEnabled = logs && overlay
         overlayButton.visibility = if (overlay) View.GONE else View.VISIBLE
-        val wait = ((RelayService.autoRetryAt - System.currentTimeMillis() + 999) / 1000).toInt()
+        val wait = ((NavetteService.autoRetryAt - System.currentTimeMillis() + 999) / 1000).toInt()
         autoStatus.removeCallbacks(tick)
-        if (RelayService.autoAccess == AutoCopy.Access.DENIED && wait > 0) autoStatus.postDelayed(tick, 1000)
+        if (NavetteService.autoAccess == AutoCopy.Access.DENIED && wait > 0) autoStatus.postDelayed(tick, 1000)
         autoStatus.text = when {
             !logs -> "① Autorisation « journaux » manquante : branchez le téléphone au Mac et lancez " +
                 "android/scripts/activer-auto.sh (une seule fois).\n" +
                 (if (overlay) "② « Apparaître au-dessus » : OK" else "② Autorisez « Apparaître au-dessus » ci-dessous.")
             !overlay -> "① Journaux : OK\n② Autorisez « Apparaître au-dessus » ci-dessous."
             !settings.autoSend -> "En pause : utilisez la tuile ou la notification."
-            RelayService.autoAccess == AutoCopy.Access.DENIED && wait > 0 ->
+            NavetteService.autoAccess == AutoCopy.Access.DENIED && wait > 0 ->
                 "Envoi auto en pause. Android n’autorise qu’une demande d’accès aux journaux par minute : " +
                     "elle s’affichera dans $wait s, gardez Navette ouverte."
-            RelayService.autoAccess == AutoCopy.Access.DENIED ->
+            NavetteService.autoAccess == AutoCopy.Access.DENIED ->
                 "Envoi auto en pause : acceptez la demande d’accès aux journaux (« Autoriser l’accès unique »)."
-            RelayService.autoAccess == AutoCopy.Access.CHECKING -> "Vérification… (acceptez la demande d’accès aux journaux)"
-            RelayService.autoAccess == AutoCopy.Access.GRANTED -> "Actif : ce que vous copiez part tout seul vers le Mac."
+            NavetteService.autoAccess == AutoCopy.Access.CHECKING -> "Vérification… (acceptez la demande d’accès aux journaux)"
+            NavetteService.autoAccess == AutoCopy.Access.GRANTED -> "Actif : ce que vous copiez part tout seul vers le Mac."
             else -> "Démarrage…"
         }
         val power = getSystemService(PowerManager::class.java)
@@ -294,7 +283,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PHONE || requestCode == REQUEST_BLUETOOTH) RelayService.refresh(this)
+        if (requestCode == REQUEST_PHONE || requestCode == REQUEST_BLUETOOTH) NavetteService.refresh(this)
     }
 
     // --- Actions ---
@@ -313,7 +302,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Presse-papier vide", Toast.LENGTH_SHORT).show()
             return
         }
-        Relay.send(settings, content) { error ->
+        Transport.send(settings, content) { error ->
             Toast.makeText(this, error ?: "Envoyé au Mac ✓", Toast.LENGTH_SHORT).show()
         }
     }
@@ -337,16 +326,6 @@ class MainActivity : Activity() {
         Toast.makeText(this, if (uris.size > 1) "Envoi de ${uris.size} fichiers au Mac…" else "Envoi au Mac…", Toast.LENGTH_SHORT).show()
     }
 
-    private fun fetchLast() {
-        Relay.fetchLast(settings) { content, error ->
-            if (content != null) {
-                Clipboard.write(this, content)
-                Toast.makeText(this, "Copié : ${content.preview}", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, error, Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
     private fun addTile() {
         getSystemService(StatusBarManager::class.java).requestAddTileService(
@@ -365,29 +344,6 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun editServer() {
-        val field = EditText(this).apply {
-            setText(settings.server)
-            inputType = InputType.TYPE_TEXT_VARIATION_URI
-            gravity = Gravity.START
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Adresse du serveur")
-            .setMessage("Ex. http://192.168.1.10:3200 sur votre réseau, ou l’adresse Tailscale de votre serveur")
-            .setView(field)
-            .setPositiveButton("Enregistrer") { _, _ ->
-                val value = field.text.toString().trim()
-                if (value.startsWith("http://") || value.startsWith("https://")) {
-                    settings.server = value
-                    RelayService.start(this, reconnect = true)
-                    render()
-                } else {
-                    Toast.makeText(this, "L’adresse doit commencer par http:// ou https://", Toast.LENGTH_LONG).show()
-                }
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
-    }
 
     companion object {
         /** Écran principal au premier plan (la demande d'accès aux journaux ne s'affiche que là). */

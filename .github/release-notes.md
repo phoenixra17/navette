@@ -6,8 +6,6 @@
 2. Open it. macOS blocks it the first time because it is not signed by Apple: go to
    **System Settings › Privacy & Security**, scroll down and click **Open Anyway**.
    (Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Navette.app`.)
-3. When asked for the server address, enter the public test relay
-   `https://navette.yourpediatricsurgeon.com` — or your own relay.
 
 ### Android (Android 14+)
 
@@ -27,5 +25,5 @@ Optional features (automatic sending from the phone, instant hotspot): see the
 **Aperçu** — [vos avis sont bienvenus](https://github.com/phoenixra17/navette/issues/new/choose).
 Mac : décompressez, placez Navette dans *Applications*, puis *Réglages Système › Confidentialité et
 sécurité › Ouvrir quand même*. Android : ouvrez l'APK sur le téléphone, puis *Installer quand même* ; si Play Protect affiche « Appli bloquée », installez par câble (`adb install --user 0 Navette-….apk`) ou désactivez temporairement l'analyse Play Protect.
-Relais de test : `https://navette.yourpediatricsurgeon.com`. Détails dans le
+Détails dans le
 [README en français](https://github.com/phoenixra17/navette/blob/main/README.fr.md#installation).

@@ -122,12 +122,12 @@
             android:launchMode="singleInstance" />
 
         <service
-            android:name=".RelayService"
+            android:name=".NavetteService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Connexion permanente au serveur personnel pour recevoir le presse-papier du Mac" />
+                android:value="Connexion permanente avec le Mac pour recevoir son presse-papier" />
         </service>
 
         <service

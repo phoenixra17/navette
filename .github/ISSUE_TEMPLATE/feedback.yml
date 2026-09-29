@@ -28,7 +28,7 @@ body:
   - type: dropdown
     id: polished
     attributes:
-      label: Would you use a polished version (store install, no relay to host)?
+      label: Would you use a polished version (store install)?
       options:
         - "Yes, and I would pay for it"
         - "Yes, if it is free"

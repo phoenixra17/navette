@@ -65,7 +65,7 @@ class OpenOnMacActivity : Activity() {
         if (url == null) {
             Toast.makeText(app, "Aucun lien à ouvrir", Toast.LENGTH_SHORT).show()
         } else {
-            Relay.sendPayload(Settings(app), JSONObject().put("kind", "url").put("url", url), ephemeral = true) { error ->
+            Transport.sendPayload(Settings(app), JSONObject().put("kind", "url").put("url", url), ephemeral = true) { error ->
                 Toast.makeText(app, error ?: "Ouvert sur le Mac ✓", Toast.LENGTH_SHORT).show()
             }
         }

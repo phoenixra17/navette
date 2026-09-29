@@ -24,11 +24,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Liaison directe avec le Mac, sans serveur (voir « Liaison locale » dans PROTOCOL.md).
+ * Liaison directe avec le Mac (voir « Local link » dans PROTOCOL.md).
  * Wi-Fi : le téléphone écoute sur [PORT] et s'annonce en Bonjour (`_navette._tcp`) ; le Mac s'y
  * connecte. Bluetooth : même protocole sur une liaison BLE (voir [BleLink]). Dans les deux cas, les
- * deux appareils prouvent qu'ils détiennent le secret, puis les éléments chiffrés passent comme par
- * le relais. Démarrée et arrêtée par [RelayService].
+ * deux appareils prouvent qu'ils détiennent le secret, puis les éléments chiffrés passent.
+ * Démarrée et arrêtée par [NavetteService].
  */
 object LocalLink {
     enum class Via(val label: String) { WIFI("Wi-Fi"), BLUETOOTH("Bluetooth") }
@@ -108,13 +108,13 @@ object LocalLink {
         peers.clear()
         keys = null
         onMessage = null
-        Relay.notifyListeners()
+        Transport.notifyListeners()
     }
 
     /**
      * Envoie une trame au Mac si une liaison directe est établie (Wi-Fi d'abord) ; `done(false)` si
-     * l'écriture échoue (l'appelant passe alors par le relais). Renvoie false si pas de liaison.
-     * [bluetooth] : false pour éviter le BLE (grosse image alors que le relais est joignable).
+     * l'écriture échoue. Renvoie false si pas de liaison.
+     * [bluetooth] : false pour éviter le BLE.
      */
     fun send(message: JSONObject, bluetooth: Boolean = true, done: (Boolean) -> Unit): Boolean {
         val target = peers[Via.WIFI] ?: peers[Via.BLUETOOTH]?.takeIf { bluetooth } ?: return false
@@ -150,7 +150,7 @@ object LocalLink {
         serve(channel, Via.BLUETOOTH)
     }
 
-    /** Message `local` envoyé au Mac par le relais : où joindre le téléphone quand Bonjour ne passe pas. */
+    /** Message `local` : où joindre le téléphone quand Bonjour ne passe pas. */
     fun announcement(): JSONObject? {
         val port = port.takeIf { it > 0 } ?: return null
         return JSONObject().put("kind", "local").put("port", port).put("addrs", JSONArray(addresses()))
@@ -257,7 +257,7 @@ object LocalLink {
 
             peers.put(via, candidate)?.close()
             Log.i(TAG, "Mac connecté (${via.label}, ${channel.address})")
-            Relay.notifyListeners()
+            Transport.notifyListeners()
 
             channel.setReadTimeout(90_000) // le Mac envoie un ping toutes les 15 s
             while (true) {
@@ -286,7 +286,7 @@ object LocalLink {
         target.close()
         if (peers.remove(target.via, target)) {
             Log.i(TAG, "Mac déconnecté (${target.via.label})")
-            Relay.notifyListeners()
+            Transport.notifyListeners()
         }
     }
 

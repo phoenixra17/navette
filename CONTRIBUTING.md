@@ -15,6 +15,6 @@ why it is licensed under the AGPL-3.0 and why contributions come with one condit
 If you are not comfortable with that, please open an issue describing the change instead — it is
 just as useful.
 
-For code changes: keep the three implementations (relay, Mac, Android) compatible with the
+For code changes: keep the two apps (Mac, Android) compatible with the
 protocol in [PROTOCOL.md](PROTOCOL.md), run the tests of each part you touch, and match the
 surrounding style (comments are in French).

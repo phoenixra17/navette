@@ -3,52 +3,26 @@
 ## Keys
 
 A 256-bit secret is generated on the Mac and shared with the phone through the pairing QR code
-(`navette://pair?u=<relay address>&s=<secret>`). Three values are derived with HMAC-SHA256:
+(`navette://pair?s=<secret>`). Values are derived with HMAC-SHA256:
 
 | Derivation | Known by | Purpose |
 |---|---|---|
-| `navette/auth/v1` → token | Mac, phone, **relay** | authenticates devices to the relay (`Authorization: Bearer`) |
 | `navette/enc/v1` → AES key | Mac, phone | encrypts content (AES-256-GCM) |
 | `navette/fingerprint/v1` → 6-digit code | Mac, phone | shown on both screens when pairing, so a forged pairing link is spotted |
 
 **Protocol v2.** The associated data of each message is `navette/v2|<sender>|<id>`, where the
-sender is `mac` or `phone`: a message sent back to its own sender (by the relay, for example) does
-not decrypt. Every payload carries `t`, the sender's clock in milliseconds; messages received live
-are dropped if `t` is more than 5 minutes away from the receiver's clock or if their id was already
-seen (`ReplayGuard`). `GET /api/clip/last` is only applied if it is newer than the last clip
-received. So the relay can neither read, forge, redirect nor replay messages; it can still drop or
-delay them. v1 and v2 devices cannot talk to each other: update the Mac and the phone together.
+sender is `mac` or `phone`: a message sent back to its own sender does not decrypt. Every payload
+carries `t`, the sender's clock in milliseconds; messages are dropped if `t` is more than 5 minutes
+away from the receiver's clock or if their id was already seen (`ReplayGuard`). v1 and v2 devices
+cannot talk to each other: update the Mac and the phone together.
 
-`server/tests/protocol.js` is the reference implementation; the Swift and Kotlin test suites decrypt
-vectors it produced.
-
-## Rooms
-
-The relay routes by token: devices that present the same token share a room and only see each
-other's messages. The relay keys rooms by the SHA-256 of the token and never stores the token.
-
-- **Private mode** (`NAVETTE_TOKEN=<token>[,<token>…]`): only the listed tokens are accepted.
-- **Open mode** (`NAVETTE_OPEN=1`): any well-formed token (43 base64url characters) opens its own
-  room, so one relay can serve many users who never register. Limits keep it in check, all
-  configurable through environment variables:
-
-| Variable | Default | Limit |
-|---|---|---|
-| `NAVETTE_MAX_BYTES` | 16 MB | size of one message |
-| `NAVETTE_MAX_ROOMS` | 1000 | rooms in memory (503 beyond) |
-| `NAVETTE_MAX_DEVICES` | 8 | devices per room (403 beyond; a known device can always reconnect) |
-| `NAVETTE_RATE_MESSAGES` / `NAVETTE_RATE_MB` | 300 / 100 MB | per room and per minute (HTTP 429; dropped over WebSocket) |
-| `NAVETTE_STORE_MB` | 256 MB | memory for all “last clipboard items”; the oldest are forgotten first |
-| `NAVETTE_LAST_HOURS` | 24 | how long a room's last clipboard item is kept |
-
-`GET /api/health` returns `{"ok": true, "open": <bool>}`. In open mode, the log names rooms by the
-first six hex digits of their key and does not log individual messages (`NAVETTE_VERBOSE=1` does).
+The Swift and Kotlin test suites share reference vectors, so both implementations stay identical.
 
 ## Messages
 
-Each message is relayed as `{type: "clip", id, iv, data, ephemeral?}` over WebSocket (`/ws`) or
-`POST /api/clip`. Devices identify themselves with `X-Navette-Device`; a message goes to every
-other device. Decrypted, `kind` tells what it carries:
+Each message travels as `{type: "clip", id, iv, data, ephemeral?}` over the [local
+link](#local-link) or the [Bluetooth link](#bluetooth-link). Decrypted, `kind` tells what it
+carries:
 
 | `kind` | Direction | Fields |
 |---|---|---|
@@ -61,18 +35,18 @@ other device. Decrypted, `kind` tells what it carries:
 | `battery` | phone → Mac | `level`, `charging`, `net` (5G, 4G…), `signal` (0–4) |
 | `sync` | Mac → phone | (the phone answers with `battery`) |
 | `ring` / `ring-stop` | Mac → phone | |
+| `hotspot` / `hotspot-ok` | Mac → phone / phone → Mac | see [Instant hotspot](#instant-hotspot) |
 | `url` | ⇄ | `url` (http/https only) |
 | `file` / `file-end` / `file-ack` / `file-cancel` | ⇄ | see [Files](#files) |
 
-Everything except `text` and `image` is sent with `ephemeral: true`: the relay forwards it but does
-not keep it as the “last clipboard item” served by `GET /api/clip/last`. Unknown kinds are ignored,
-so one app can be updated before the other.
+Everything except `text` and `image` is sent with `ephemeral: true`. Unknown kinds are ignored, so
+one app can be updated before the other.
 
 ## Files
 
 Any file (a folder is zipped by the Mac first) travels as a series of `file` chunks, each one
 encrypted on its own in the [binary format](#binary-chunks), so neither side ever holds the whole
-file in memory and the relay sees nothing but ciphertext. Control messages are ordinary JSON messages.
+file in memory. Control messages are ordinary JSON messages.
 
 | `kind` | From | Fields |
 |---|---|---|
@@ -83,9 +57,9 @@ file in memory and the relay sees nothing but ciphertext. Control messages are o
 
 - **Pacing.** The Mac keeps at most 4 chunks in flight (read, sealed or being written): with a single
   one, the pipe empties between chunks and a hotspot link drops from 40 MB/s to 2.5 MB/s. Android
-  writes each chunk into its socket, whose kernel buffer does the same job, and also waits while
-  OkHttp's WebSocket queue holds more than 4 MB. Memory stays bounded either way.
-- **Chunks** are 512 KB over Wi-Fi and the relay, 32 KB over Bluetooth (so a frame passes well within
+  writes each chunk into its socket, whose kernel buffer does the same job. Memory stays bounded
+  either way.
+- **Chunks** are 512 KB over Wi-Fi, 32 KB over Bluetooth (so a frame passes well within
   the 40 s link timeout, even over GATT). Each carries its offset: the order of arrival does not
   matter. The receiver merges the byte ranges it has, so overlapping chunks of different sizes
   (the route, hence the chunk size, can change mid-transfer) are counted once.
@@ -96,12 +70,11 @@ file in memory and the relay sees nothing but ciphertext. Control messages are o
   of 20 s each. An ack whose `n` does not match the latest `file-end` is stale (chunks were still on
   their way) and ignored, unless it says complete. The receiver also sends an empty `file-ack` as
   soon as it has every byte. Only then does the sender report success.
-- **Routes.** Wi-Fi for any size (4 GB at most); without it, the relay up to 25 MB (its rate
-  limit), then Bluetooth up to 2 MB (about 50 KB/s). The route is chosen again for every chunk and
-  every `file-end`: a relay lost mid-transfer (mobile data off) gives way to Bluetooth, a Wi-Fi link
-  that comes back takes over. With no route at all, the sender waits up to 40 s. A file too large
-  for the available links is refused before sending, and a chunk of a large file never falls back
-  to the relay.
+- **Routes.** Wi-Fi for any size (4 GB at most); without it, Bluetooth up to 2 MB (about
+  50 KB/s). The route is chosen again for every chunk and every `file-end`: a Wi-Fi link lost
+  mid-transfer gives way to Bluetooth, a Wi-Fi link that comes back takes over. With no route at
+  all, the sender waits up to 40 s. A file too large for the available links is refused before
+  sending.
 - **Received files** are assembled in a cache folder, then moved to `~/Downloads` on the Mac (`name
   2.ext` if taken) or copied to `Download/Navette` on Android (MediaStore). The name is sanitised on
   both sides: no path, no leading dot, no control character.
@@ -117,25 +90,22 @@ File chunks skip base64, which would otherwise add 78 % (base64 of a JSON payloa
   length is set, and the body is a 2-byte big-endian header length, a JSON header `{id, iv}` (iv in
   base64), then ciphertext ‖ tag. Each side announces that it reads binary frames with `bin: 1` in
   its `hello`; without it, chunks go as JSON clips.
-- **Relay:** a regular clip `{id, iv, data}` whose `data` is the base64 of ciphertext ‖ tag (base64
-  once). The relay needs no change; a receiver whose JSON decryption fails tries the binary format.
 
 Measured between a MacBook and a Galaxy S24: 1.00 byte on the wire per byte of file over the direct
 link (1.8 with base64); 200 MB in about 5 s Mac → phone and 3 s phone → Mac over the phone's 5 GHz
-hotspot; 1 MB in 18–20 s over Bluetooth (34–41 s before). `server/tests/protocol.js` (`sealBinary`, `openBinary`) holds the
-reference vector for both test suites.
+hotspot; 1 MB in 18–20 s over Bluetooth (34–41 s before). Both test suites share a reference
+vector.
 
 ## Local link
 
-When both devices share a network, they talk directly and the relay is not needed.
+When both devices share a network, they talk directly over TCP.
 
 - **The phone listens** on TCP port 3201 (any free port if taken) and advertises `_navette._tcp`
   over Bonjour/mDNS, with a TXT record `id` = the first 6 bytes, in hex, of
-  HMAC(secret, `navette/local-id/v1`): the Mac only connects to its own phone. The phone also sends
-  `{kind: "local", port, addrs}` through the relay (Wi-Fi and hotspot addresses first, then others
-  such as Tailscale; never mobile data), so the Mac can reach it where mDNS does not pass.
+  HMAC(secret, `navette/local-id/v1`): the Mac only connects to its own phone.
 - **The Mac connects**, trying in order: `NAVETTE_LOCAL=host:port` (debugging), Bonjour results,
-  announced addresses. It retries with backoff (2 s → 60 s) and at once on wake or network change.
+  then its gateway (on the phone's hotspot, the phone itself).
+  It retries with backoff (2 s → 60 s) and at once on wake or network change.
 - **Framing:** 4-byte big-endian length, then UTF-8 JSON (or a [binary chunk](#binary-chunks) when the
   length's high bit is set). At most 4 KB per frame before authentication, 24 MB after.
 - **Handshake**, with `localKey` = HMAC(secret, `navette/local/v1`) and
@@ -148,12 +118,10 @@ When both devices share a network, they talk directly and the relay is not neede
 
   A device that does not hold the secret gets nothing but a closed connection. The phone accepts
   at most four handshakes at once and one authenticated Mac (the newest replaces the previous).
-- **Then** the same `{type: "clip", id, iv, data, ephemeral?}` messages as on the relay, still
-  encrypted end to end and checked by `ReplayGuard`, plus `ping`/`pong` every 15 s (the Mac drops
-  the link after 40 s of silence). A device sends directly when the link is up and falls back to
-  the relay if that fails.
+- **Then** `{type: "clip", id, iv, data, ephemeral?}` messages, encrypted end to end and checked by
+  `ReplayGuard`, plus `ping`/`pong` every 15 s (the Mac drops the link after 40 s of silence).
 
-`server/tests/protocol.js` (`localProof`) holds reference vectors for both test suites.
+Both test suites share reference vectors for the handshake proofs.
 
 ## Bluetooth link
 
@@ -178,12 +146,11 @@ over Bluetooth Low Energy, so the devices still talk with no network at all.
   also reconnects when the phone's service changes (app restarted) or after 40 s without news
   (pings every 15 s).
 - **Throughput** measured between a MacBook and a Galaxy S24, L2CAP at 15 ms: about 50 KB/s each
-  way (GATT at 30 ms: 24 KB/s Mac → phone, 5 KB/s phone → Mac). A large image (> 256 KB) still
-  goes through the relay when both devices are connected to it: the phone reports `relay` with
-  `battery`, the Mac with `sync`.
-- The link is independent of the hands-free connection used for the hotspot (Bluetooth Classic,
-  closed after 15 s), and does not count as a connected device for Samsung routines: it does not
-  turn the hotspot on.
+  way (GATT at 30 ms: 24 KB/s Mac → phone, 5 KB/s phone → Mac).
+- Once established, the link **counts as a connected device for Samsung routines** (checked on a
+  Galaxy S24, One UI 8): a routine triggered by “Bluetooth device › Mac connected” fires on the next
+  Bluetooth event of the phone, e.g. whenever the Mac loses its Wi-Fi link and falls back to
+  Bluetooth. Hence the notification trigger for the hotspot below.
 
 ## Automatic sending from Android
 
@@ -204,10 +171,15 @@ see system logs (by starting a non-existent service, which the system logs) and,
 
 ## Instant hotspot
 
-Android lets no third-party app turn the hotspot on; a Samsung Modes & Routines routine can,
-triggered by “Bluetooth device connected”. A bare Bluetooth link does not count as connected
-on Android, so the Mac opens a Hands-Free Profile service-level connection (RFCOMM to the phone's
-`0x111F` service, then `AT+BRSF`, `AT+CIND=?`, `AT+CIND?`, `AT+CMER`) and closes it after
+Android lets no third-party app turn the hotspot on; a Samsung Modes & Routines routine can.
+Its trigger is **“Notification received” › Navette › keyword “demandé par le Mac”**: the Mac sends
+`hotspot` over any link (Wi-Fi or Bluetooth; without a shared network, Bluetooth), the
+phone posts the notification “Point d’accès demandé par le Mac” (15 s) and answers `hotspot-ok`.
+
+A “Bluetooth device › Mac connected” trigger would also fire on Navette's Bluetooth link (see
+above). It remains the fallback when no link answers within 8 s: a bare Bluetooth link does not
+count as connected, so the Mac opens a Hands-Free Profile service-level connection (RFCOMM to the
+phone's `0x111F` service, then `AT+BRSF`, `AT+CIND=?`, `AT+CIND?`, `AT+CMER`) and closes it after
 15 seconds. No audio is ever set up.
 
 The Mac then **scans** for the hotspot network (a scan does not drop the current Wi-Fi) and joins

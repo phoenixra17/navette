@@ -79,7 +79,7 @@ class SendActivity : Activity() {
             Toast.makeText(app, "Rien à envoyer", Toast.LENGTH_SHORT).show()
             return
         }
-        Relay.send(Settings(app), content) { error ->
+        Transport.send(Settings(app), content) { error ->
             Toast.makeText(app, error ?: "Envoyé au Mac ✓", Toast.LENGTH_SHORT).show()
         }
     }

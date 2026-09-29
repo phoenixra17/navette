@@ -5,12 +5,10 @@ import Foundation
 /// dernier, l'expéditeur envoie `file-end` ; le destinataire répond `file-ack` avec les plages
 /// manquantes (morceaux perdus sur une liaison morte), que l'expéditeur renvoie. Vide = reçu.
 public enum FileChunks {
-    /// Wi-Fi et relais.
+    /// Wi-Fi.
     public static let chunkSize = 512 * 1024
     /// Bluetooth : une trame doit passer bien avant le délai de 40 s sans nouvelles, même en GATT (5 Ko/s).
     public static let bluetoothChunkSize = 32 * 1024
-    /// Au-delà, pas de relais (limite de débit du serveur) : il faut la liaison Wi-Fi.
-    public static let maxRelayBytes: Int64 = 25 * 1024 * 1024
     /// Au-delà, pas de Bluetooth (environ 50 Ko/s).
     public static let maxBluetoothBytes: Int64 = 2 * 1024 * 1024
     public static let maxBytes: Int64 = 4 * 1024 * 1024 * 1024

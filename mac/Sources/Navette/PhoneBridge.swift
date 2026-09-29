@@ -23,10 +23,6 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
     var showNotifications = true
 
     private(set) var battery: Battery?
-    /// Le téléphone est-il connecté au relais ? (indiqué avec la batterie)
-    private(set) var phoneOnRelay = false
-    /// Le Mac l'est-il ? (transmis au téléphone avec `sync`)
-    var macOnRelay = false
     private(set) var isRinging = false
     private var lowBatteryAlerted = false
     private var ringTimer: Timer?
@@ -86,7 +82,7 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
 
     /// À la connexion : le téléphone renvoie son état (batterie).
     func sync() {
-        send?(["kind": "sync", "relay": macOnRelay])
+        send?(["kind": "sync"])
     }
 
     func ring() {
@@ -241,9 +237,6 @@ final class PhoneBridge: NSObject, UNUserNotificationCenterDelegate {
     // MARK: Batterie
 
     private func updateBattery(_ json: [String: Any]) {
-        let onRelay = json["relay"] as? Bool ?? false
-        if onRelay != phoneOnRelay { Self.log("téléphone sur le relais : \(onRelay)") }
-        phoneOnRelay = onRelay
         guard let level = json["level"] as? Int else { return }
         let charging = json["charging"] as? Bool ?? false
         battery = Battery(level: level, charging: charging, network: json["net"] as? String ?? "",

@@ -3,10 +3,10 @@ import Foundation
 import Network
 import SystemConfiguration
 
-/// Liaison directe avec le téléphone, sans serveur (voir « Liaison locale » dans PROTOCOL.md).
+/// Liaison directe avec le téléphone (voir « Local link » dans PROTOCOL.md).
 /// Le téléphone écoute et s'annonce en Bonjour (`_navette._tcp`) ; le Mac le cherche et s'y connecte.
 /// Candidats, dans l'ordre : adresse forcée (`NAVETTE_LOCAL=hôte:port`), Bonjour, les adresses que
-/// le téléphone a envoyées par le relais (Wi-Fi, point d'accès, Tailscale), puis la passerelle du
+/// le téléphone a envoyées (Wi-Fi, point d'accès, Tailscale), puis la passerelle du
 /// Mac : sur le point d'accès du téléphone, c'est le téléphone lui-même, joignable sans Bonjour ni
 /// internet.
 /// Tout se passe sur la file principale.
@@ -89,7 +89,7 @@ public final class LocalLink {
 
     // MARK: Envoi
 
-    /// false si la liaison n'est pas établie : l'appelant passe alors par le relais.
+    /// false si la liaison n'est pas établie : l'appelant passe alors par le Bluetooth.
     @discardableResult
     public func send(_ clip: NavetteCrypto.Clip, ephemeral: Bool = false,
                      completion: ((Bool) -> Void)? = nil) -> Bool {

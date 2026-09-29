@@ -2,7 +2,8 @@
 
 **Make an Android phone work with a Mac the way an iPhone does.**
 Universal clipboard, notifications with quick reply, instant hotspot, “ring my phone”, links that
-jump between devices — end-to-end encrypted, through a small relay you host yourself.
+jump between devices — end-to-end encrypted, straight from one device to the other over Wi-Fi or
+Bluetooth, with no server in between.
 
 > 🇫🇷 [Lire en français](README.fr.md)
 
@@ -21,29 +22,25 @@ jump between devices — end-to-end encrypted, through a small relay you host yo
 | **Phone status** | Battery, network (5G/4G) and signal bars in the Mac menu, like an iPhone in the Wi-Fi menu. Low-battery alert. |
 | **Ring my phone** | Rings at full volume, even in silent mode. |
 | **Handoff-style links** | Phone: *Share › Open on Mac*. Mac: send the current Safari/Chrome/Arc/Brave/Edge tab, or a copied link, to the phone. |
-| **Files** | Any file or folder, either way. Mac: drop it on the menu bar icon, *Services › Send to phone (Navette)* in the Finder, or the menu. Phone: *Share › File to Mac*. Received files land in Downloads. Fast over the direct Wi-Fi link; without it, up to 25 MB through the relay. |
+| **Files** | Any file or folder, either way. Mac: drop it on the menu bar icon, *Services › Send to phone (Navette)* in the Finder, or the menu. Phone: *Share › File to Mac*. Received files land in Downloads. Fast over Wi-Fi (40 MB/s on the phone's 5 GHz hotspot); over Bluetooth, up to 2 MB. |
 | **History** | The last 10 items exchanged, in the Mac menu (memory only, never written to disk). |
 
 ## How it works
 
 ```
-Mac app (Swift, menu bar)                Android app (Kotlin)
-  watches the clipboard                    foreground service
-  shows notifications                      notification listener, share targets, tile
-          ⇅ WebSocket                               ⇅ WebSocket / HTTP
-                 Relay (Node.js, Docker) — only sees encrypted blobs
+Mac app (Swift, menu bar)                      Android app (Kotlin)
+  watches the clipboard                          foreground service
+  shows notifications                            notification listener, share targets, tile
+        ⇅ Wi-Fi (same network, or the Mac on the phone's hotspot) — or Bluetooth ⇅
 ```
 
 - **End-to-end encryption.** A 256-bit secret is created on the Mac and handed to the phone by QR
-  code. Everything is encrypted with AES-256-GCM before leaving a device. The relay only knows an
-  access token derived one-way from the secret: it can neither read nor alter anything.
-- **Direct link, no relay needed.** When the Mac and the phone share a network — same Wi-Fi, or the
-  Mac on the phone's hotspot — the Mac finds the phone (Bonjour) and talks to it directly: faster,
-  and it keeps working with no internet and the relay down. With no shared network, they fall back
-  to **Bluetooth** (text is instant, images are slow). Otherwise, the relay takes over.
-- **A public test relay** is available while Navette is in preview, so you can try it without
-  hosting anything (see [Install](#install)). Or **host your own** on any machine both devices can
-  reach: a NAS, a Raspberry Pi, a small VPS.
+  code. Everything is encrypted with AES-256-GCM before leaving a device, and both devices prove
+  they hold the secret before exchanging anything.
+- **Direct, no server.** When the Mac and the phone share a network — same Wi-Fi, or the Mac on the
+  phone's hotspot — the Mac finds the phone (Bonjour) and talks to it directly, with or without
+  internet. With no shared network, they fall back to **Bluetooth** (text is instant, images are
+  slow). Nothing goes through a third-party server.
 - Password-manager items (marked *concealed* on macOS, *sensitive* on Android) are never sent.
 
 Details: [PROTOCOL.md](PROTOCOL.md).
@@ -55,8 +52,10 @@ Details: [PROTOCOL.md](PROTOCOL.md).
   lets it read system logs. Android 13+ then asks you to allow log access **again after every
   restart of the app** (phone reboot, update). Without it, sending from the phone takes one
   gesture: Quick Settings tile, notification button, text selection menu, or Share.
+- **The devices must be near each other**: on the same Wi-Fi network, the Mac on the phone's
+  hotspot, or within Bluetooth range. There is no remote mode.
 - **Instant hotspot relies on a Samsung routine**, because Android lets no app turn the hotspot on.
-  The Mac briefly connects to the phone as a Bluetooth hands-free device to trigger it.
+  Navette on the phone posts a notification that triggers it.
 - **Not signed by Apple, not on the Play Store.** You download the apps from
   [Releases](https://github.com/phoenixra17/navette/releases/latest) (or build them) and open them
   by hand: Gatekeeper and Play Protect will warn you.
@@ -69,8 +68,7 @@ The apps' interface is in **French** for now; menu labels are quoted as they app
 
 **Quickest:** download `Navette-…-mac.zip` and `Navette-….apk` from the
 [latest release](https://github.com/phoenixra17/navette/releases/latest) — its page explains how to
-open them — then enter the test relay and pair the phone as described below. To build from source,
-follow steps 1–3.
+open them — then pair the phone as described below. To build from source, follow steps 1–2.
 
 ### 1. Mac
 
@@ -80,38 +78,11 @@ Requirements: Xcode, and `brew install xcodegen` (for the Control Center button)
 cd mac && scripts/build-app.sh --install && open /Applications/Navette.app
 ```
 
-On first launch, enter the relay address — to try Navette, the public test relay:
-
-```
-https://navette.yourpediatricsurgeon.com
-```
-
-and skip step 2. Allow Bluetooth,
+Allow Bluetooth,
 notifications and location when asked — location only because macOS hides Wi-Fi network names
 from apps without it; your position is neither used nor sent.
 
-### 2. Your own relay (optional)
-
-Use **Copier le jeton du serveur** (copy the server token) in the Mac menu, then:
-
-```bash
-cd server
-printf 'NAVETTE_TOKEN=%s\nTZ=Europe/Paris\n' 'PASTE_THE_TOKEN_HERE' > .env && chmod 600 .env
-docker compose up -d --build
-curl http://localhost:3200/api/health   # → {"ok":true,"open":false}
-```
-
-Then set the Mac's **Adresse du serveur…** (server address) to your relay, e.g.
-`http://192.168.1.10:3200`, or its [Tailscale](https://tailscale.com) address to reach it from
-anywhere, 4G included. The menu bar icon turns from “!” to connected within seconds.
-
-**Sharing one relay.** With `NAVETTE_OPEN=1` instead of `NAVETTE_TOKEN`, the relay accepts any
-Navette pair: each one gets its own room and cannot see the others (see [PROTOCOL.md](PROTOCOL.md#rooms)
-for the limits). Exposed through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-or any HTTPS reverse proxy, it lets friends or testers use Navette without hosting anything or
-installing Tailscale: they enter `https://your-relay.example.com` on first launch.
-
-### 3. Android
+### 2. Android
 
 Build with a JDK 17+ (Android Studio's works): `cd android && ./gradlew assembleRelease`, then
 install `app/build/outputs/apk/release/app-release.apk`. Open Navette › **Scanner le code du Mac**
@@ -135,8 +106,10 @@ Protect*, install the APK, then turn it back on.
 run `android/scripts/activer-auto.sh`, then accept the log-access prompt in Navette.
 
 **Optional — instant hotspot (Samsung):** pair the Mac and the phone over Bluetooth, then create a
-routine: **If** *Bluetooth device › your Mac › Connected*, **Then** *Mobile Hotspot › On*, with
-*Keep routine until: Always*. Click the phone in the Mac menu; the first time, Navette asks for the
+routine: **If** *Notification received › Navette*, with the keyword `demandé par le Mac`, **Then**
+*Mobile Hotspot › On*. (Avoid the *Bluetooth device › your Mac › Connected* trigger: Navette's
+Bluetooth link counts as a connection, and the hotspot would turn on whenever the Mac loses its
+Wi-Fi.) Click the phone in the Mac menu; the first time, Navette asks for the
 hotspot password and keeps it in your keychain.
 
 ## Feedback
@@ -145,26 +118,17 @@ This is why the repository is public. Please [open an issue](../../issues/new/ch
 
 - which features you would actually use, and what is missing (an English interface?);
 - your devices (Mac / macOS version, phone / Android version) and what did or didn't work;
-- whether you would want a polished version — app-store install, no self-hosted relay — and
-  whether you would pay for it.
-
-## About the test relay
-
-It is run by the author on a home server, on a best-effort basis: it may be down at times, and
-it may go away once Navette becomes an app. It only ever sees encrypted data (it cannot read your
-clipboard or notifications) and keeps nothing on disk; it does see IP addresses and when devices
-connect. Each pair of devices has its own room; limits apply (see [PROTOCOL.md](PROTOCOL.md#rooms)).
-If you'd rather not depend on it, host your own relay (step 2).
+- whether you would want a polished version — app-store install — and whether you would pay
+  for it.
 
 ## Development
 
 | | |
 |---|---|
-| Relay | `cd server && npm test` |
 | Mac | `cd mac && swift test` · `scripts/build-app.sh` |
 | Android | `cd android && ./gradlew testDebugUnitTest assembleRelease` |
 
-The three implementations share test vectors for the encryption. Code comments are in French.
+The two apps share test vectors for the encryption. Code comments are in French.
 
 Mac builds are signed ad hoc, so macOS asks again for Bluetooth, Location… after each rebuild. Run
 `mac/scripts/create-signing-cert.sh` once: it creates a local signing certificate in your login

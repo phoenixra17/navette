@@ -33,12 +33,10 @@ import java.util.concurrent.TimeUnit
  */
 object FileTransfers {
     private const val TAG = "NavetteFichier"
-    /** Wi-Fi et relais. */
+    /** Wi-Fi. */
     const val CHUNK = 512 * 1024
     /** Bluetooth : une trame doit passer bien avant le délai de 40 s du Mac. */
     const val BLUETOOTH_CHUNK = 32 * 1024
-    /** Au-delà, pas de relais (limite de débit du serveur) : il faut la liaison Wi-Fi. */
-    const val MAX_RELAY_BYTES = 25L * 1024 * 1024
     /** Au-delà, pas de Bluetooth (environ 50 Ko/s). */
     const val MAX_BLUETOOTH_BYTES = 2L * 1024 * 1024
     const val MAX_BYTES = 4L * 1024 * 1024 * 1024
@@ -50,8 +48,6 @@ object FileTransfers {
     private const val MAX_RETRIES = 20
     private const val MAX_MISSING_RANGES = 1000
     private const val MAX_CONCURRENT = 4
-    /** File d'envoi d'OkHttp au-delà de laquelle on attend (il ferme le WebSocket à 16 Mo). */
-    private const val MAX_WS_QUEUE = 4L * 1024 * 1024
 
     private const val CHANNEL_PROGRESS = "transferts"
     private const val CHANNEL_DONE = "fichiers"
@@ -123,7 +119,7 @@ object FileTransfers {
         if (size > MAX_BYTES) return "trop gros (plus de 4 Go)"
         val mime = resolver.getType(uri)
 
-        val (chunk, _) = route(size) ?: return if (LocalLink.isConnected || Relay.socket != null) {
+        val (chunk, _) = route(size) ?: return if (LocalLink.isConnected) {
             "trop gros sans liaison Wi-Fi avec le Mac (${formatSize(size)})"
         } else "Mac injoignable"
         Log.i(TAG, "envoi de « $name » (${formatSize(size)}, morceaux de ${chunk / 1024} Ko)")
@@ -131,7 +127,7 @@ object FileTransfers {
         val inbox = java.util.concurrent.LinkedBlockingQueue<JSONObject>()
         replies[fid] = inbox
         try {
-            val link = Link(context, settings, uri, fid, name, size, mime, allowRelay = size <= MAX_RELAY_BYTES)
+            val link = Link(context, settings, uri, fid, name, size, mime)
             var ranges = listOf(0L to size)
             var rounds = 0
             while (true) {
@@ -142,7 +138,7 @@ object FileTransfers {
                     if (cancelled) return link.cancel()
                     // Même chemin que les morceaux : il arrive après eux. `n` identifie la réponse.
                     val n = rounds * 100 + attempt
-                    Relay.sendPayload(settings, JSONObject().put("kind", "file-end").put("fid", fid)
+                    Transport.sendPayload(settings, JSONObject().put("kind", "file-end").put("fid", fid)
                         .put("name", name).put("size", size).put("n", n), ephemeral = true,
                         allowBluetooth = route(size)?.second ?: true)
                     val deadline = System.currentTimeMillis() + ACK_TIMEOUT_S * 1000
@@ -179,13 +175,12 @@ object FileTransfers {
     }
 
     /**
-     * Wi-Fi direct pour tout ; sinon le relais jusqu'à 25 Mo, puis le Bluetooth jusqu'à 2 Mo. Taille
-     * des morceaux et Bluetooth permis ou non ; null = aucun chemin pour l'instant. Réévalué à chaque
-     * morceau : relais perdu en route → Bluetooth, Wi-Fi retrouvé…
+     * Wi-Fi direct pour tout ; sinon le Bluetooth jusqu'à 2 Mo. Taille des morceaux et Bluetooth
+     * permis ou non ; null = aucun chemin pour l'instant. Réévalué à chaque morceau : Wi-Fi perdu
+     * en route → Bluetooth, Wi-Fi retrouvé…
      */
     private fun route(size: Long): Pair<Int, Boolean>? = when {
         LocalLink.isConnected(LocalLink.Via.WIFI) -> CHUNK to false
-        Relay.socket != null && Relay.macOnRelay && size <= MAX_RELAY_BYTES -> CHUNK to false
         LocalLink.isConnected(LocalLink.Via.BLUETOOTH) && size <= MAX_BLUETOOTH_BYTES -> BLUETOOTH_CHUNK to true
         else -> null
     }
@@ -193,13 +188,13 @@ object FileTransfers {
     /** Envoi des morceaux d'un fichier (et renvoi des plages perdues). */
     private class Link(
         val context: Context, val settings: Settings, val uri: Uri, val fid: String, val name: String,
-        val size: Long, val mime: String?, val allowRelay: Boolean,
+        val size: Long, val mime: String?,
     ) {
         private var sent = 0L
         private var lastNotified = 0L
 
         fun cancel(): String {
-            Relay.sendPayload(settings, JSONObject().put("kind", "file-cancel").put("fid", fid), ephemeral = true)
+            Transport.sendPayload(settings, JSONObject().put("kind", "file-cancel").put("fid", fid), ephemeral = true)
             return "annulé"
         }
 
@@ -220,7 +215,7 @@ object FileTransfers {
                     var retries = 0
                     var path = route(size)
                     while (path == null) {
-                        // Liaison qui change (relais perdu, Bluetooth en cours de connexion) : on attend un moment.
+                        // Liaison qui change (Wi-Fi perdu, Bluetooth en cours de connexion) : on attend un moment.
                         if (++retries > MAX_RETRIES || cancelled) return "liaison perdue"
                         Thread.sleep(2_000)
                         path = route(size)
@@ -234,7 +229,7 @@ object FileTransfers {
                     // Chiffré aussitôt (copie) : le tampon peut resservir au morceau suivant.
                     val bytes = if (n == buffer.size) buffer else buffer.copyOf(n)
                     while (true) {
-                        val error = sendAndWait(settings, meta, bytes, path!!.second, allowRelay) ?: break
+                        val error = sendAndWait(settings, meta, bytes, path!!.second) ?: break
                         if (++retries > MAX_RETRIES || cancelled) return error
                         Thread.sleep(2_000)
                         path = route(size) ?: path
@@ -260,16 +255,14 @@ object FileTransfers {
     }
 
     /** Envoie un morceau et attend qu'il soit parti : pas de file d'attente de plusieurs Go. */
-    private fun sendAndWait(settings: Settings, meta: JSONObject, bytes: ByteArray, bluetooth: Boolean, allowRelay: Boolean): String? {
+    private fun sendAndWait(settings: Settings, meta: JSONObject, bytes: ByteArray, bluetooth: Boolean): String? {
         val latch = CountDownLatch(1)
         var error: String? = null
-        Relay.sendChunk(settings, meta, bytes, allowBluetooth = bluetooth, allowRelay = allowRelay) {
+        Transport.sendChunk(settings, meta, bytes, allowBluetooth = bluetooth) {
             error = it
             latch.countDown()
         }
         if (!latch.await(120, TimeUnit.SECONDS)) return "délai dépassé"
-        // Par le relais, « envoyé » veut dire « confié à OkHttp » : on le laisse vider sa file.
-        while (error == null && (Relay.socket?.queueSize() ?: 0L) > MAX_WS_QUEUE && !cancelled) Thread.sleep(50)
         return error
     }
 
@@ -366,7 +359,7 @@ object FileTransfers {
         val payload = if (missing == null) JSONObject().put("kind", "file-cancel").put("fid", fid)
             else JSONObject().put("kind", "file-ack").put("fid", fid).put("missing", org.json.JSONArray(missing.map { org.json.JSONArray(it) }))
         if (n != null && missing != null) payload.put("n", n)
-        Relay.sendPayload(Settings(context), payload, ephemeral = true)
+        Transport.sendPayload(Settings(context), payload, ephemeral = true)
     }
 
     private fun accept(context: Context, payload: JSONObject) {

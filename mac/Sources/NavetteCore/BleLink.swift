@@ -80,7 +80,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
 
     // MARK: Envoi
 
-    /// false si la liaison n'est pas établie : l'appelant passe alors par le relais.
+    /// false si la liaison n'est pas établie.
     @discardableResult
     public func send(_ clip: NavetteCrypto.Clip, ephemeral: Bool = false,
                      completion: ((Bool) -> Void)? = nil) -> Bool {
@@ -122,7 +122,7 @@ public final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         central.scanForPeripherals(withServices: [Self.service], options: nil)
     }
 
-    /// Coupe tout ; les rappels d'écriture en attente échouent (l'appelant repasse par le relais).
+    /// Coupe tout ; les rappels d'écriture en attente échouent.
     private func reset() {
         timeout?.invalidate()
         pingTimer?.invalidate()

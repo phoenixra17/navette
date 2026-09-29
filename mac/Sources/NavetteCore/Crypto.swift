@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-/// Protocole Navette v2 — doit rester identique à `server/tests/protocol.js` et à l'app Android.
+/// Protocole Navette v2 — doit rester identique à l'app Android (vecteurs de test communs).
 /// v2 : les données associées lient chaque élément à son expéditeur, et les messages reçus en
 /// direct passent par `ReplayGuard` (voir PROTOCOL.md).
 public enum NavetteCrypto {
@@ -18,7 +18,7 @@ public enum NavetteCrypto {
     /// Expéditeur d'un élément : un élément renvoyé à son propre expéditeur ne se déchiffre pas.
     public enum Role: String { case mac, phone }
 
-    /// Élément chiffré tel qu'il circule par le serveur.
+    /// Élément chiffré tel qu'il circule entre les appareils.
     public struct Clip: Codable, Equatable {
         public let id: String
         public let iv: String
@@ -68,7 +68,7 @@ public enum NavetteCrypto {
 
     /// Morceau de fichier au format binaire (voir « Binary chunks » dans PROTOCOL.md) : en clair,
     /// 4 octets de longueur, les métadonnées en JSON, puis les octets bruts. Sur une liaison directe,
-    /// il circule tel quel dans une trame binaire ; par le relais, en base64 dans un `Clip`.
+    /// il circule tel quel dans une trame binaire.
     public struct Chunk: Equatable {
         public let id: String
         public let iv: Data
@@ -81,7 +81,7 @@ public enum NavetteCrypto {
             self.box = box
         }
 
-        /// Un `Clip` venu du relais qui n'est pas du JSON est peut-être un morceau binaire.
+        /// Un `Clip` qui n'est pas du JSON est peut-être un morceau binaire.
         public init?(clip: Clip) {
             guard let iv = Data(base64Encoded: clip.iv), let box = Data(base64Encoded: clip.data) else { return nil }
             self.init(id: clip.id, iv: iv, box: box)
@@ -197,8 +197,8 @@ public enum NavetteCrypto {
     }
 }
 
-/// Refuse les messages reçus en direct qui sont périmés ou déjà vus : quelqu'un qui ne détient que
-/// le jeton du serveur (le serveur lui-même, par exemple) ne peut pas les rejouer.
+/// Refuse les messages reçus qui sont périmés ou déjà vus :
+/// un intermédiaire ne peut pas les rejouer.
 public final class ReplayGuard {
     /// Horloges du Mac et du téléphone comprises.
     public static let maxAgeMs: Double = 5 * 60 * 1000

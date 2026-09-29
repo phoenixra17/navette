@@ -1,3 +1,4 @@
 *.apk
 .DS_Store
 NOTES-PERSO.md
+__pycache__/

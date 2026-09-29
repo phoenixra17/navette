@@ -2,13 +2,9 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import NavetteCore
 
-/// Fenêtre d'appairage : le QR (adresse + secret) à scanner avec l'app Android,
-/// et le jeton à donner au serveur.
+/// Fenêtre d'appairage : le QR (secret) à scanner avec l'app Android.
 final class PairingWindow: NSWindowController {
-    private let onCopyToken: () -> Void
-
-    init(config: Config, token: String, fingerprint: String, onCopyToken: @escaping () -> Void) {
-        self.onCopyToken = onCopyToken
+    init(config: Config, fingerprint: String) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 600),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Appairer Navette"
@@ -32,20 +28,13 @@ final class PairingWindow: NSWindowController {
         check.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
         check.alignment = .center
 
-        let serverHelp = NSTextField(wrappingLabelWithString:
-            "Serveur : \(config.server)\nLe serveur a besoin du jeton ci-dessous dans sa variable NAVETTE_TOKEN.")
-        serverHelp.alignment = .center
-
-        let copy = NSButton(title: "Copier le jeton du serveur", target: self, action: #selector(copyToken))
-        copy.bezelStyle = .rounded
-
-        let stack = NSStackView(views: [title, qr, check, warning, serverHelp, copy])
+        let stack = NSStackView(views: [title, qr, check, warning])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for label in [warning, serverHelp] {
+        for label in [warning] {
             label.widthAnchor.constraint(equalToConstant: 360).isActive = true
         }
 
@@ -63,10 +52,6 @@ final class PairingWindow: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError("non utilisé") }
 
-    @objc private func copyToken(_ sender: NSButton) {
-        onCopyToken()
-        sender.title = "Jeton copié ✓"
-    }
 
     private static func qrImage(_ string: String, size: CGFloat) -> NSImage {
         let filter = CIFilter.qrCodeGenerator()

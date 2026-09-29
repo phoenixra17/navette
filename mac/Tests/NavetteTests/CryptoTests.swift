@@ -2,7 +2,7 @@ import XCTest
 import AppKit
 @testable import NavetteCore
 
-/// Vecteurs produits par l'implémentation de référence (server/tests/protocol.js).
+/// Vecteurs de référence, communs aux apps Mac et Android.
 final class CryptoTests: XCTestCase {
     let secret = "q3l2m9d1Xv0kPZ3n4wYtR8sE5uA7bC6fGhJiKlMnOpQ"
 
