@@ -28,6 +28,8 @@ import java.util.Locale
  */
 class AutoCopy(
     private val context: Context,
+    /** L'écran principal est-il au premier plan ? Seul moment où la demande d'accès peut s'afficher. */
+    private val isForeground: () -> Boolean,
     private val onAccessChanged: () -> Unit,
     private val onContent: (ClipContent) -> Unit,
 ) {
@@ -58,13 +60,29 @@ class AutoCopy(
         startReader()
     }
 
+    /** Début de la dernière lecture des journaux, et de celle qui a valu le refus en cours. */
+    @Volatile private var requestedAt = 0L
+    @Volatile private var declinedAt = 0L
+
+    /**
+     * Android garde un refus en mémoire une minute (LogcatManagerService) : pendant ce temps, toute
+     * nouvelle demande est refusée sans rien afficher, même Navette au premier plan. D'où la
+     * notification qu'il fallait toucher plusieurs fois. Heure à partir de laquelle redemander.
+     */
+    val retryAt get() = if (access == Access.DENIED) declinedAt + DECLINE_MEMORY_MS else 0L
+
+    private val retry = Runnable { if (running && access == Access.DENIED && isForeground()) logcat?.destroy() }
+
     /** À appeler quand Navette passe au premier plan : c'est le seul moment où Android peut
-     *  afficher la demande d'accès aux journaux. */
+     *  afficher la demande d'accès aux journaux. Si le refus est encore en mémoire, on attend
+     *  qu'il expire, tant que l'écran reste ouvert. Aussi appelé à chaque refus : si l'écran
+     *  est ouvert à ce moment-là, la demande suivante viendra toute seule (une par minute). */
     fun retryIfDenied() {
-        // Pas pendant CHECKING : la fermeture de la demande d'accès fait revenir l'écran principal,
-        // et relancer à ce moment redemanderait l'accès en boucle.
+        // Pas pendant CHECKING : la demande est déjà en cours.
         if (!running || access != Access.DENIED) return
-        logcat?.destroy() // le fil de lecture relance aussitôt un nouveau logcat
+        main.removeCallbacks(retry)
+        // Le fil de lecture relance un logcat 500 ms après l'arrêt de celui-ci.
+        main.postDelayed(retry, (retryAt - 500 - System.currentTimeMillis()).coerceAtLeast(0))
     }
 
     private fun startReader() {
@@ -73,7 +91,11 @@ class AutoCopy(
 
     private fun setAccess(value: Access) {
         if (access == value) return
+        // Refus reçu plus d'une minute après le précédent : c'est une nouvelle décision d'Android,
+        // pas le refus gardé en mémoire.
+        if (value == Access.DENIED && requestedAt - declinedAt >= DECLINE_MEMORY_MS) declinedAt = requestedAt
         access = value
+        if (value == Access.DENIED) main.post { retryIfDenied() }
         main.post(onAccessChanged)
     }
 
@@ -86,6 +108,7 @@ class AutoCopy(
 
     fun stop() {
         running = false
+        main.removeCallbacks(retry)
         logcat?.destroy()
         logcat = null
         clipboard.removePrimaryClipChangedListener(noopListener)
@@ -96,6 +119,7 @@ class AutoCopy(
         val marker = "Denying clipboard access to ${context.packageName}"
         val probeMarker = "${context.packageName}/.${PROBE_CLASS.substringAfterLast('.')}"
         setAccess(Access.CHECKING)
+        requestedAt = System.currentTimeMillis()
         try {
             val process = ProcessBuilder("logcat", "-T", since, "-v", "brief", "*:W")
                 .redirectErrorStream(true)
@@ -146,6 +170,8 @@ class AutoCopy(
 
     companion object {
         private const val TAG = "NavetteAuto"
+        /** Une minute chez Android (STATUS_EXPIRATION_TIMEOUT_MILLIS), plus une marge. */
+        private const val DECLINE_MEMORY_MS = 62_000L
 
         /** Instance qui attend le résultat de ReadClipboardActivity. */
         @Volatile internal var pending: AutoCopy? = null

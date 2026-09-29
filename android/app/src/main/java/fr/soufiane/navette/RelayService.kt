@@ -69,7 +69,7 @@ class RelayService : Service() {
     private fun refreshAutoCopy() {
         if (AutoCopy.isAvailable(this) && settings.autoSend) {
             if (autoCopy == null) {
-                autoCopy = AutoCopy(this, onAccessChanged = { onAutoAccessChanged() }) { content -> autoSend(content) }
+                autoCopy = AutoCopy(this, isForeground = { MainActivity.visible }, onAccessChanged = { onAutoAccessChanged() }) { content -> autoSend(content) }
                     .also { it.start() }
             } else {
                 autoCopy?.retryIfDenied()
@@ -83,6 +83,7 @@ class RelayService : Service() {
 
     private fun onAutoAccessChanged() {
         autoAccess = autoCopy?.access
+        autoRetryAt = autoCopy?.retryAt ?: 0L
         updateNotification()
         Relay.notifyListeners()
     }
@@ -385,6 +386,9 @@ class RelayService : Service() {
 
         /** État de l'accès aux journaux, affiché par l'écran principal (null = envoi auto inactif). */
         @Volatile var autoAccess: AutoCopy.Access? = null
+            private set
+        /** Heure à laquelle la demande d'accès aux journaux pourra s'afficher (0 = sans objet). */
+        @Volatile var autoRetryAt = 0L
             private set
 
         fun refresh(context: Context) {

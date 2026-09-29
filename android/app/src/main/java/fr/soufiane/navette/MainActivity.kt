@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private lateinit var phonePermissionButton: Button
     private lateinit var bluetoothButton: Button
     private val stateListener: () -> Unit = { render() }
+    /** Compte à rebours avant la demande d'accès aux journaux. */
+    private val tick = Runnable { render() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,6 +98,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        visible = true
         Relay.addListener(stateListener)
         // Une autorisation vient peut-être d'être accordée (réglages ou ADB) : le service réévalue.
         if (settings.isPaired) RelayService.refresh(this)
@@ -103,6 +106,8 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        visible = false
+        autoStatus.removeCallbacks(tick)
         Relay.removeListener(stateListener)
         super.onPause()
     }
@@ -265,15 +270,20 @@ class MainActivity : Activity() {
         autoSwitch.isChecked = settings.autoSend
         autoSwitch.isEnabled = logs && overlay
         overlayButton.visibility = if (overlay) View.GONE else View.VISIBLE
+        val wait = ((RelayService.autoRetryAt - System.currentTimeMillis() + 999) / 1000).toInt()
+        autoStatus.removeCallbacks(tick)
+        if (RelayService.autoAccess == AutoCopy.Access.DENIED && wait > 0) autoStatus.postDelayed(tick, 1000)
         autoStatus.text = when {
             !logs -> "① Autorisation « journaux » manquante : branchez le téléphone au Mac et lancez " +
                 "android/scripts/activer-auto.sh (une seule fois).\n" +
                 (if (overlay) "② « Apparaître au-dessus » : OK" else "② Autorisez « Apparaître au-dessus » ci-dessous.")
             !overlay -> "① Journaux : OK\n② Autorisez « Apparaître au-dessus » ci-dessous."
             !settings.autoSend -> "En pause : utilisez la tuile ou la notification."
+            RelayService.autoAccess == AutoCopy.Access.DENIED && wait > 0 ->
+                "Envoi auto en pause. Android n’autorise qu’une demande d’accès aux journaux par minute : " +
+                    "elle s’affichera dans $wait s, gardez Navette ouverte."
             RelayService.autoAccess == AutoCopy.Access.DENIED ->
-                "Accès aux journaux refusé. Quittez Navette, attendez une minute, rouvrez-la et " +
-                    "acceptez la demande d’accès aux journaux."
+                "Envoi auto en pause : acceptez la demande d’accès aux journaux (« Autoriser l’accès unique »)."
             RelayService.autoAccess == AutoCopy.Access.CHECKING -> "Vérification… (acceptez la demande d’accès aux journaux)"
             RelayService.autoAccess == AutoCopy.Access.GRANTED -> "Actif : ce que vous copiez part tout seul vers le Mac."
             else -> "Démarrage…"
@@ -380,6 +390,10 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        /** Écran principal au premier plan (la demande d'accès aux journaux ne s'affiche que là). */
+        @Volatile var visible = false
+            private set
+
         private const val REQUEST_PHONE = 2
         private const val REQUEST_BLUETOOTH = 3
         private const val REQUEST_FILES = 4
